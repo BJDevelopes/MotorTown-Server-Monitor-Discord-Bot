@@ -17,6 +17,7 @@ const API_HOST = process.env.API_HOST;
 const API_PASSWORD = process.env.API_PASSWORD;
 const API_PORT = process.env.API_PORT || '8080';
 const BOT_NICKNAME = process.env.BOT_NICKNAME || null;
+const CHAT_CHANNEL_ID = process.env.CHAT_CHANNEL_ID || null;
 
 // Admin user IDs (comma-separated in .env)
 const ADMIN_USER_IDS = process.env.ADMIN_USER_IDS 
@@ -101,8 +102,23 @@ async function apiCall(endpoint, method = 'GET', params = {}) {
         const config = {
             method: method,
             url: url,
-            params: { password: API_PASSWORD, ...params }
         };
+
+        // For GET requests, use query parameters
+        if (method === 'GET') {
+            config.params = { password: API_PASSWORD, ...params };
+        } else {
+            // For POST requests, use URLSearchParams to properly encode the body
+            const formData = new URLSearchParams();
+            formData.append('password', API_PASSWORD);
+            for (const [key, value] of Object.entries(params)) {
+                formData.append(key, value);
+            }
+            config.data = formData;
+            config.headers = {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            };
+        }
 
         const response = await axios(config);
         return response.data;
@@ -306,9 +322,16 @@ client.once('ready', async () => {
         }
     }
     
-    // Set bot activity status
-    client.user.setActivity('Motortown', { type: 0 }); // Type 0 = Playing
-    console.log('Bot activity set to: Playing Motortown');
+    if (CHAT_CHANNEL_ID) {
+        console.log(`Chat channel configured: ${CHAT_CHANNEL_ID}`);
+    }
+    
+    // Set initial bot activity status
+    await updateBotStatus();
+    console.log('Bot activity set with player count');
+    
+    // Update status every 60 seconds
+    setInterval(updateBotStatus, 60000);
     
     // Set bot nickname in all guilds if configured
     if (BOT_NICKNAME) {
@@ -326,6 +349,47 @@ client.once('ready', async () => {
         }
     }
 });
+
+// Function to update bot status with player count
+async function updateBotStatus() {
+    try {
+        const result = await apiCall('/player/count', 'GET');
+        if (result.succeeded) {
+            const playerCount = result.data.num_players;
+            // You can adjust the max player count or make it dynamic
+            client.user.setActivity(`${playerCount} players online`, { type: 0 }); // Type 0 = Playing
+        }
+    } catch (error) {
+        console.error('Failed to update bot status:', error.message);
+        // Fallback to default status
+        client.user.setActivity('Motortown', { type: 0 });
+    }
+}
+
+// Function to send in-game chat to Discord channel
+async function sendChatToDiscord(message, username = 'Server') {
+    if (!CHAT_CHANNEL_ID) return;
+    
+    try {
+        const channel = await client.channels.fetch(CHAT_CHANNEL_ID);
+        if (channel && channel.isTextBased()) {
+            // Create embed for in-game chat message
+            const embed = new EmbedBuilder()
+                .setColor(0x00AA00)
+                .setAuthor({ name: username })
+                .setDescription(message)
+                .setTimestamp();
+            
+            await channel.send({ embeds: [embed] });
+        }
+    } catch (error) {
+        console.error('Failed to send chat to Discord:', error.message);
+    }
+}
+
+// Note: The Motortown Web API doesn't currently provide a chat monitoring endpoint
+// This function is prepared for future API updates or webhook integration
+// For now, this serves as a placeholder for the CHAT_CHANNEL_ID feature
 
 // Set nickname when bot joins a new server
 client.on('guildCreate', async (guild) => {

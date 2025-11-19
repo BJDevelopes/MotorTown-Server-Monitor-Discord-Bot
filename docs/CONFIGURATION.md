@@ -71,6 +71,16 @@ Complete guide to all environment variables and configuration options.
 - **Note:** Bot needs "Change Nickname" permission in servers
 - **Leave empty to:** Use the bot's default username
 
+#### `CHAT_CHANNEL_ID`
+- **Type:** String (Discord Channel ID)
+- **Required:** No
+- **Default:** None
+- **Description:** Discord channel ID where in-game chat messages will be mirrored
+- **Example:** `1234567890123456789`
+- **How to get:** Enable Developer Mode in Discord → Right-click channel → Copy Channel ID
+- **Note:** Currently prepared for future API updates (Motortown API doesn't provide chat monitoring yet)
+- **Leave empty to:** Disable chat mirroring feature
+
 #### `PLAYER_MAPPING`
 - **Type:** String (pipe-separated mappings)
 - **Required:** No
