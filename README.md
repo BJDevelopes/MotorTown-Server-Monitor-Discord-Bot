@@ -273,8 +273,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 🔗 Links
 
 - **Documentation**: [Full documentation](docs/)
-- **Issues**: [Report a bug](https://github.com/yourusername/motortown-discord-bot/issues)
-- **Discussions**: [Ask questions](https://github.com/yourusername/motortown-discord-bot/discussions)
+- **Issues**: [Report a bug](https://github.com/BJDevelopes/motortown-discord-bot/issues)
+- **Discussions**: [Ask questions](https://github.com/BJDevelopes/motortown-discord-bot/discussions)
 - **Motortown**: [Game Website](https://motortown-game.com/)
 
 ## ⚠️ Disclaimer
