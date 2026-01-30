@@ -121,9 +121,38 @@ ADMIN_USER_IDS=your_discord_user_id
 
 # Player Mapping (optional)
 PLAYER_MAPPING=gameID:discordUserID|gameID:name
+
+# Server Monitor (optional)
+MONITOR_CHANNEL_ID=1235653767
+SERVER_NAME=Example Town
+LOGO_URL=https://example.com
+
 ```
 
 See [Configuration Guide](docs/CONFIGURATION.md) for all options.
+
+## 🏙️ Server Monitor Feature
+The bot includes a real-time server monitor that automatically creates and maintains a status dashboard in a designated Discord channel.
+
+### Features
+* **Auto-Setup**: The bot automatically sends its own monitor message on the first run; no manual message ID copying is required.
+* **Persistence**: Saves message data to `monitor_data.json` to ensure it resumes editing the same message after a restart.
+* **Offline Tracking**: If the game server goes down, the embed turns red and displays the **Last Seen Online** timestamp.
+* **Efficient**: Updates every 60 seconds using a compact layout designed for high-population servers.
+
+### ⚙️ Configuration
+Add these variables to your `.env` file to enable the monitor:
+
+```bash
+# The ID of the Discord channel where the monitor message will live
+MONITOR_CHANNEL_ID=123456789012345678
+
+# The name of your server as it should appear in the title
+SERVER_NAME=Bjs Motor Town
+
+# (Optional) Link to your community or server logo
+LOGO_URL=[https://i.imgur.com/your-image.png](https://i.imgur.com/your-image.png)
+
 
 ## 📖 Commands
 
