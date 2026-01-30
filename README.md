@@ -31,6 +31,13 @@ A comprehensive Discord bot for monitoring and managing Motortown game servers. 
 - **Announcements** - Broadcast important messages to all players
 - **Status Updates** - Bot shows "Playing Motortown" status
 
+### 🏙️ Server Monitor Feature
+The bot includes a real-time server monitor that automatically creates and maintains a status dashboard in a designated Discord channel.
+- **Auto-Setup**: The bot automatically sends its own monitor message on the first run; no manual message ID copying is required.
+- **Persistence**: Saves message data to `monitor_data.json` to ensure it resumes editing the same message after a restart.
+- **Offline Tracking**: If the game server goes down, the embed turns red and displays the **Last Seen Online** timestamp.
+- **Efficient**: Updates every 60 seconds using a compact layout designed for high-population servers.
+
 ## 📋 Table of Contents
 
 - [Quick Start](#-quick-start)
@@ -131,14 +138,6 @@ LOGO_URL=https://example.com
 
 See [Configuration Guide](docs/CONFIGURATION.md) for all options.
 
-## 🏙️ Server Monitor Feature
-The bot includes a real-time server monitor that automatically creates and maintains a status dashboard in a designated Discord channel.
-
-### Features
-* **Auto-Setup**: The bot automatically sends its own monitor message on the first run; no manual message ID copying is required.
-* **Persistence**: Saves message data to `monitor_data.json` to ensure it resumes editing the same message after a restart.
-* **Offline Tracking**: If the game server goes down, the embed turns red and displays the **Last Seen Online** timestamp.
-* **Efficient**: Updates every 60 seconds using a compact layout designed for high-population servers.
 
 ### ⚙️ Configuration
 Add these variables to your `.env` file to enable the monitor:
