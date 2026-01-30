@@ -1,6 +1,9 @@
 const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes } = require('discord.js');
 const axios = require('axios');
 require('dotenv').config();
+const fs = require('fs'); 
+const MONITOR_DATA_FILE = './monitor_data.json';
+const {ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 
 const client = new Client({
     intents: [
@@ -18,6 +21,8 @@ const API_PASSWORD = process.env.API_PASSWORD;
 const API_PORT = process.env.API_PORT || '8080';
 const BOT_NICKNAME = process.env.BOT_NICKNAME || null;
 const CHAT_CHANNEL_ID = process.env.CHAT_CHANNEL_ID || null;
+const MONITOR_CHANNEL_ID = process.env.MONITOR_CHANNEL_ID;
+const MONITOR_MESSAGE_ID = process.env.MONITOR_MESSAGE_ID; // You'll get this after the first run
 
 // Admin user IDs (comma-separated in .env)
 const ADMIN_USER_IDS = process.env.ADMIN_USER_IDS 
@@ -94,6 +99,88 @@ async function getPlayerDisplayName(uniqueId, originalName, guildId = null) {
     }
     return originalName;
 }
+
+// Server Monitor Function
+
+async function refreshServerMonitor() {
+    const channelId = process.env.MONITOR_CHANNEL_ID;
+    if (!channelId) return;
+
+    try {
+        const channel = await client.channels.fetch(channelId);
+        let message = null;
+
+        // 1. Data Loading & API Fetch
+        let savedData = { messageId: null, lastOnline: 'Never' };
+        if (fs.existsSync(MONITOR_DATA_FILE)) {
+            savedData = JSON.parse(fs.readFileSync(MONITOR_DATA_FILE));
+        }
+
+        const baseUrl = `http://${API_HOST}:${API_PORT}`;
+        let apiData;
+        try {
+            // We only need count and version now to keep it efficient
+            const [countRes, versionRes] = await Promise.all([
+                axios.get(`${baseUrl}/player/count/?password=${API_PASSWORD}`, { timeout: 3000 }),
+                axios.get(`${baseUrl}/version/?password=${API_PASSWORD}`, { timeout: 3000 })
+            ]);
+            
+            apiData = { 
+                online: true, 
+                count: countRes.data.data.num_players, 
+                version: versionRes.data.data.version 
+            };
+            
+            savedData.lastOnline = new Date().toLocaleString();
+            fs.writeFileSync(MONITOR_DATA_FILE, JSON.stringify(savedData));
+        } catch (e) { 
+            apiData = { online: false }; 
+        }
+
+        // 2. Build the Compact Styled Embed
+        const serverName = process.env.SERVER_NAME || "Motor Town Server";
+        const monitorEmbed = new EmbedBuilder()
+            .setTitle(`**${serverName}**`)
+            .setThumbnail(process.env.LOGO_URL || null)
+            .setTimestamp()
+            .setFooter({ text: 'Auto-refreshes every 60s' });
+
+        if (apiData.online) {
+            monitorEmbed
+                .setColor(0x2ecc71) // Green
+                .addFields(
+                    { name: '👥 Players', value: `\`${apiData.count} online\``, inline: true },
+                    { name: '📡 Status', value: '🟢 **Online**', inline: true },
+                    { name: '⚙️ Version', value: `\`${apiData.version}\``, inline: true }
+                );
+        } else {
+            monitorEmbed
+                .setColor(0xe74c3c) // Red
+                .addFields(
+                    { name: '📡 Status', value: '🔴 **Offline**', inline: true },
+                    { name: '🕒 Last Seen', value: `\`${savedData.lastOnline}\``, inline: true }
+                )
+                .setDescription('The server is currently unreachable or restarting.');
+        }
+
+        // 3. Persistence & Sending
+        if (savedData.messageId) {
+            try { message = await channel.messages.fetch(savedData.messageId); } catch (e) {}
+        }
+
+        if (!message) {
+            message = await channel.send({ embeds: [monitorEmbed] });
+            savedData.messageId = message.id;
+            fs.writeFileSync(MONITOR_DATA_FILE, JSON.stringify(savedData));
+        } else {
+            await message.edit({ embeds: [monitorEmbed], components: [] });
+        }
+
+    } catch (error) { 
+        console.error("Monitor Styling Error:", error.message); 
+    }
+}
+
 
 // Helper function to make API calls
 async function apiCall(endpoint, method = 'GET', params = {}) {
@@ -329,9 +416,13 @@ client.once('ready', async () => {
     // Set initial bot activity status
     await updateBotStatus();
     console.log('Bot activity set with player count');
+
+    // Initial run
+    refreshServerMonitor()
     
     // Update status every 60 seconds
     setInterval(updateBotStatus, 60000);
+
     
     // Set bot nickname in all guilds if configured
     if (BOT_NICKNAME) {
