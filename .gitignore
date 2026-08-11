@@ -3,6 +3,12 @@ node_modules/
 
 # Environment variables
 .env
+.env.*
+!.env.example
+
+# Runtime state written by the bot
+monitor_data.json
+admin_data.json
 
 # Logs
 logs
@@ -27,3 +33,4 @@ Thumbs.db
 
 # Optional eslint cache
 .eslintcache
+*.local

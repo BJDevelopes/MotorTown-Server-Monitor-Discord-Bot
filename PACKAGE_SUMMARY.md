@@ -28,7 +28,7 @@ setup.bat          - Automated setup for Windows
 ### Main Documentation (5 files)
 ```
 README.md          - Main project documentation
-CHANGELOG.md       - Version history (v1.0.0 - v1.5.2)
+CHANGELOG.md       - Version history (v1.0.0 - v2.0.0)
 LICENSE            - MIT License
 CONTRIBUTING.md    - Contribution guidelines
 SECURITY.md        - Security policy
@@ -161,7 +161,7 @@ Discord bot for Motortown game server management - Monitor players, manage bans,
 Add to top of README.md:
 ```markdown
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Node.js](https://img.shields.io/badge/node-%3E%3D16.9.0-brightgreen)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen)](https://nodejs.org/)
 [![Discord.js](https://img.shields.io/badge/discord.js-v14-blue)](https://discord.js.org/)
 [![Stars](https://img.shields.io/github/stars/YOUR_USERNAME/motortown-discord-bot?style=social)](https://github.com/YOUR_USERNAME/motortown-discord-bot/stargazers)
 ```

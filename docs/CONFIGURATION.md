@@ -45,13 +45,88 @@ Complete guide to all environment variables and configuration options.
 - **Required:** Yes
 - **Description:** Discord User IDs of users who can execute admin commands
 - **Example:** `120343643381956608,987654321098765432`
-- **Default:** `120343643381956608`
-- **Format:** Comma-separated, no spaces
+- **Format:** Comma-separated
 - **How to get User IDs:**
   1. Enable Developer Mode in Discord (Settings → Advanced)
   2. Right-click username → Copy User ID
+- **Note:** This is the base list. Admins added later with `/addadmin` are stored separately in
+  `admin_data.json` and merged in at startup, so they survive restarts.
 
 ### Optional Variables
+
+#### `API_TIMEOUT`
+- **Type:** Number (milliseconds)
+- **Required:** No
+- **Default:** `10000`
+- **Description:** How long to wait for the game server to respond before giving up
+- **Note:** Raise this if your server is on a slow or distant connection
+
+#### `JOIN_SERVER_NAME`
+- **Type:** String
+- **Required:** No
+- **Default:** Falls back to `SERVER_NAME`
+- **Description:** The name players should search for in the in-game server list, shown by `/join`
+- **Note:** If neither this nor `SERVER_NAME` is set, `/join` replies that it isn't configured
+
+#### `JOIN_PASSWORD`
+- **Type:** String
+- **Required:** No
+- **Default:** None
+- **Description:** The password players need to enter the game server, shown by `/join`
+- **Note:** Leave empty for a public server; the password step is then omitted from the instructions
+- **⚠️ Never hardcode this in source.** Earlier versions of this bot shipped a real server password
+  in `bot.js`; it now lives here so it stays out of git.
+
+#### `JOIN_LINK`
+- **Type:** String (URL)
+- **Required:** No
+- **Default:** None
+- **Description:** Optional link shown in `/join`, e.g. your community site or Discord invite
+
+#### `MONITOR_CHANNEL_ID`
+- **Type:** String (Discord Channel ID)
+- **Required:** No
+- **Default:** None
+- **Description:** Channel where the bot maintains its auto-updating status dashboard
+- **Note:** The bot posts its own message on first run and then edits it in place. The message ID
+  is saved to `monitor_data.json`, so no manual copying is needed.
+- **Leave empty to:** Disable the server monitor
+
+#### `MONITOR_INTERVAL`
+- **Type:** Number (seconds)
+- **Required:** No
+- **Default:** `60`
+- **Description:** How often the monitor dashboard refreshes
+- **Note:** Each refresh makes two lightweight API calls. Values below 30 are not recommended.
+
+#### `SERVER_NAME`
+- **Type:** String
+- **Required:** No
+- **Default:** `Motor Town Server`
+- **Description:** Title shown on the monitor dashboard, and the fallback for `JOIN_SERVER_NAME`
+
+#### `LOGO_URL`
+- **Type:** String (URL)
+- **Required:** No
+- **Default:** None
+- **Description:** Thumbnail image shown on the monitor dashboard
+
+#### `PLAYER_FEED_CHANNEL_ID`
+- **Type:** String (Discord Channel ID)
+- **Required:** No
+- **Default:** None
+- **Description:** Channel where the bot posts when players join or leave the server
+- **Note:** The Web API cannot read in-game chat, so this is the closest available live feed.
+  The bot stays quiet while the server is unreachable (rather than reporting everyone as having
+  left) and doesn't announce the existing roster after a restart.
+- **Leave empty to:** Disable the join/leave feed
+
+#### `PLAYER_FEED_INTERVAL`
+- **Type:** Number (seconds)
+- **Required:** No
+- **Default:** `60`
+- **Description:** How often the player list is polled for the join/leave feed
+- **Note:** Lower values give a more responsive feed at the cost of more API traffic
 
 #### `API_PORT`
 - **Type:** String (numeric)
@@ -78,7 +153,8 @@ Complete guide to all environment variables and configuration options.
 - **Description:** Discord channel ID where in-game chat messages will be mirrored
 - **Example:** `1234567890123456789`
 - **How to get:** Enable Developer Mode in Discord → Right-click channel → Copy Channel ID
-- **Note:** Currently prepared for future API updates (Motortown API doesn't provide chat monitoring yet)
+- **Note:** Reserved. The Motor Town Web API still has no endpoint for reading in-game chat, so
+  this does nothing yet. For a live activity feed, use `PLAYER_FEED_CHANNEL_ID` instead.
 - **Leave empty to:** Disable chat mirroring feature
 
 #### `PLAYER_MAPPING`
@@ -116,15 +192,31 @@ CLIENT_ID=1234567890123456789
 BOT_NICKNAME=Server Monitor
 
 # Game Server API
-API_HOST=192.168.1.100
+API_HOST=127.0.0.1
 API_PORT=8080
 API_PASSWORD=MySecurePassword123
+API_TIMEOUT=10000
 
 # Bot Admins
 ADMIN_USER_IDS=120343643381956608,987654321098765432,456789012345678901
 
+# Join instructions
+JOIN_SERVER_NAME=Bjs Town
+JOIN_PASSWORD=your_server_password
+JOIN_LINK=https://discord.gg/example
+
 # Player Mapping (using Discord User IDs)
 PLAYER_MAPPING=12345:120343643381956608|67890:987654321098765432|11111:Bob
+
+# Server monitor dashboard
+MONITOR_CHANNEL_ID=1234567890123456789
+MONITOR_INTERVAL=60
+SERVER_NAME=Bjs Town
+LOGO_URL=https://i.imgur.com/example.png
+
+# Player join/leave feed
+PLAYER_FEED_CHANNEL_ID=1234567890123456789
+PLAYER_FEED_INTERVAL=60
 ```
 
 ### Multiple Admins
@@ -178,8 +270,11 @@ Your `DedicatedServerConfig.json` must have these settings:
 ### Important Notes:
 1. `HostWebAPIServerPassword` must match `API_PASSWORD` in `.env`
 2. `HostWebAPIServerPort` must match `API_PORT` in `.env` (default: 8080)
-3. The port must be open in your firewall
-4. The bot must be able to reach the server IP from its location
+3. The bot must be able to reach the server IP and port from its location
+4. **Do not forward this port to the public internet** — see Security Best Practices below
+
+Newer dedicated server builds also support `HostWebAPIDisabledCommands`, which lets you switch
+off individual Web API commands you don't intend to use.
 
 ## Security Best Practices
 
@@ -210,9 +305,16 @@ ADMIN_USER_IDS=your_id,trusted_friend_id
 - Update .env after changes
 
 ### 5. Secure Your Server
-- Use firewall rules to limit API access
-- Only open necessary ports
-- Consider using a VPN for bot-to-server communication
+
+⚠️ **The Motor Town Web API has no encryption.** The password is sent as a plain query parameter
+over plain HTTP on every request, so anyone who can observe the traffic can read it and then issue
+their own kick, ban, and announce commands against your server.
+
+- **Best:** run the bot on the same machine as the dedicated server and set `API_HOST=127.0.0.1`
+- **Good:** keep the bot and server on the same LAN or a private VPN
+- **Never:** forward the Web API port on your router or expose it to the internet
+- If you must expose it, put an HTTPS reverse proxy in front and restrict access by IP
+- Use `HostWebAPIDisabledCommands` on newer server builds to disable API commands you don't need
 
 ## Validation Checklist
 
@@ -275,9 +377,14 @@ In Discord:
 - Check firewall settings
 - Test with curl command above
 
-### Error: "Password incorrect"
+### Error: "Invalid password" / "Password incorrect"
 **Problem:** `API_PASSWORD` doesn't match server
 **Solution:** Verify password in both `.env` and `DedicatedServerConfig.json`
+
+**If this only happens on `/announce`, `/serverchat`, `/kick`, `/ban` or `/unban`** while read-only
+commands like `/status` work fine, you are running a version before 2.0.0. That was a bot bug —
+POST parameters were sent in the request body, but the Motor Town API only reads them from the
+query string, so the server saw no password. Update the bot.
 
 ### Warning: "Failed to set nickname"
 **Problem:** Bot lacks "Change Nickname" permission
@@ -306,13 +413,13 @@ If you set a variable in both places, the environment variable takes precedence 
 ## Updating Configuration
 
 ### Runtime Changes (No Restart Required)
-- `/addadmin` - Add temporary admin
-- `/removeadmin` - Remove temporary admin
+- `/addadmin` - Add an admin; saved to `admin_data.json` and kept across restarts
+- `/removeadmin` - Remove an admin; permanent unless they are listed in `ADMIN_USER_IDS`,
+  in which case you must also remove them from `.env`
 
 ### Changes Requiring Restart
 - Editing `.env` file
 - Changing any environment variables
-- Adding permanent admins
 
 ### How to Restart
 ```bash

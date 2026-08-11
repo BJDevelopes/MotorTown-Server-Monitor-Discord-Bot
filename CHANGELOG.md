@@ -1,6 +1,83 @@
 # Changelog
 
-# Changelog
+## Version 2.0.0 - Audit, Fixes & Modern API Support
+
+### 🐛 Bug Fixes
+- **Fixed "Invalid password" on `/announce`, `/serverchat`, `/kick`, `/ban` and `/unban`**
+  ([#1](https://github.com/BJDevelopes/motortown-discord-bot/issues/1)) - The Motor Town Web API
+  reads every parameter from the query string, including on POST requests. Version 1.6.0 moved
+  POST parameters into a form-encoded request body, so the server saw no password at all and
+  rejected every write command. All POST endpoints now send parameters as query parameters again,
+  with axios handling the encoding (which also fixes the spaces-in-messages issue 1.6.0 was
+  originally trying to solve).
+- **Fixed the server monitor never refreshing** - The 60-second interval only updated the bot's
+  activity status; the dashboard embed was drawn once at startup and then left stale forever,
+  despite its footer promising otherwise.
+- **Fixed API passwords containing special characters** - The monitor built request URLs by string
+  interpolation, so a password containing `&`, `#`, `+` or a space silently failed to authenticate
+  while the rest of the bot worked. The monitor now goes through the shared, properly-encoded API layer.
+- **Fixed crashes on busy servers** - `/players`, `/housing`, `/banlist`, `/admins` and `/police`
+  added one embed field per entry with no limit, so the 26th entry exceeded Discord's 25-field cap
+  and the command failed outright. These now render compact lists that fit Discord's limits and
+  report anything that didn't fit.
+- **Fixed `!!ban <id> <reason>` dropping the reason** - The text-command parser assumed the reason
+  always started at the third argument, so omitting the optional duration silently discarded it.
+- **Fixed `!!addadmin` / `!!removeadmin` failing on uncached users** - Now resolves users through
+  Discord's mention parser instead of a cache lookup, and reports clearly when no user was found.
+- **Fixed the bot loading no configuration when started from another directory** - `.env` is now
+  read relative to `bot.js` rather than the current working directory.
+
+### ✨ New Features
+- **Player name autocomplete** - `/kick`, `/ban`, `/unban`, `/addrole` and `/removerole` suggest
+  players as you type, so admins never have to copy unique IDs by hand. `/unban` autocompletes from
+  the ban list. Results are cached for a few seconds to avoid hammering the game server.
+- **`/find <name>`** - Search online players by full or partial name and get their unique ID.
+- **`/addrole` and `/removerole`** - Grant and revoke in-game admin/police roles, using the
+  `/player/role/add` and `/player/role/remove` endpoints the bot previously never called.
+- **Player join/leave feed** - Optional `PLAYER_FEED_CHANNEL_ID` posts when players connect and
+  disconnect. It stays silent while the server is unreachable rather than reporting a mass exodus,
+  and doesn't announce the existing roster after a restart.
+- **`/company [days]`** - Reads company profit figures from the `/company/profit` endpoint added in
+  a 2026 server update, degrading gracefully on older server builds.
+- **`/apiraw <endpoint> [key=value ...]`** - Admin-only raw Web API access, so new endpoints from
+  future game updates can be explored without waiting for a bot update.
+- **AFK and autopilot indicators** in `/players`, using fields added to `/player/list` in the
+  0.7.19 server update. Older servers simply show no badge.
+- **Daily peak player count** in the server monitor dashboard.
+- **Persistent bot admins** - Admins added with `/addadmin` are saved to `admin_data.json` and now
+  survive a restart instead of being silently lost.
+- **Configurable refresh intervals** - `MONITOR_INTERVAL` and `PLAYER_FEED_INTERVAL`.
+
+### 🔒 Security
+- **Removed the hardcoded game server name and join password from the source** - `/join` now reads
+  `JOIN_SERVER_NAME`, `JOIN_PASSWORD` and `JOIN_LINK` from the environment. If you ran a previous
+  version, rotate your server password: it was published in this repository.
+- Documented that the Web API is unencrypted and should never be exposed to the public internet,
+  replacing the previous advice to open the port in your firewall.
+- `.gitignore` now covers all `.env.*` files and the runtime state files, and `monitor_data.json`
+  is no longer tracked in git.
+
+### 🔧 Technical Changes
+- Startup now validates required configuration and exits with a readable message listing exactly
+  what is missing, instead of failing later with a cryptic Discord error.
+- API errors are translated into actionable messages (unreachable host, DNS failure, timeout)
+  rather than surfacing raw error codes.
+- Request timeouts are configurable via `API_TIMEOUT` and applied to every call.
+- Migrated to non-deprecated discord.js APIs: `MessageFlags.Ephemeral` instead of `ephemeral: true`,
+  and `Events.*` constants instead of raw event-name strings.
+- Added `unhandledRejection`, client error, and SIGINT/SIGTERM handlers so transient failures no
+  longer take the bot down silently.
+- Failed slash-command registration no longer prevents the bot from starting.
+- Player coordinates are formatted for readability instead of printing raw Unreal vectors.
+- Dependencies updated (discord.js 14.27, axios 1.19, dotenv 17.4); Node 18+ is now required.
+
+### 📝 Configuration Changes
+- New optional variables: `JOIN_SERVER_NAME`, `JOIN_PASSWORD`, `JOIN_LINK`,
+  `PLAYER_FEED_CHANNEL_ID`, `PLAYER_FEED_INTERVAL`, `MONITOR_INTERVAL`, `API_TIMEOUT`
+- Removed unused `MONITOR_MESSAGE_ID` (the monitor has managed its own message ID since 1.7)
+- `CHAT_CHANNEL_ID` remains reserved: the Web API still provides no way to read in-game chat
+
+---
 
 ## Version 1.6.0 - Dynamic Status & Chat Fixes
 

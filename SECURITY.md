@@ -4,8 +4,11 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 1.5.x   | :white_check_mark: |
-| < 1.5   | :x:                |
+| 2.x     | :white_check_mark: |
+| < 2.0   | :x:                |
+
+Versions before 2.0.0 shipped a real game server join password in `bot.js`. If you ever ran one
+of those versions with your own password substituted in, rotate it.
 
 ## Reporting a Vulnerability
 
@@ -40,8 +43,13 @@ We will respond within 48 hours and work with you to address the issue.
    - Limit admin access to trusted users
 
 4. **Secure your server**
-   - Use firewall rules for API port
-   - Don't expose API to public internet
+   - **Never forward the Web API port to the public internet.** The API is plain HTTP and the
+     password is sent in the URL on every request, so anyone who can observe the traffic can
+     read it and then kick, ban, or announce on your server.
+   - Best: run the bot on the same machine as the dedicated server with `API_HOST=127.0.0.1`
+   - Otherwise: keep both ends on a LAN or private VPN
+   - On newer server builds, use `HostWebAPIDisabledCommands` to switch off API commands you
+     don't need
    - Use strong API passwords
 
 ### For Contributors
@@ -65,9 +73,11 @@ We will respond within 48 hours and work with you to address the issue.
    - Keep it secret and rotate periodically
 
 2. **API Password**
-   - Transmitted over HTTP (not HTTPS)
-   - Use a firewall to restrict access
-   - Consider using a VPN for remote access
+   - Transmitted over plain HTTP as a URL query parameter — it is not encrypted, and it appears
+     in full in any traffic capture or intermediate proxy log
+   - This is a limitation of the Motor Town Web API itself, not of this bot
+   - Keep the API on localhost or a private network; use an HTTPS reverse proxy if you must
+     expose it, and restrict access by IP
 
 3. **Admin Permissions**
    - Admin commands can kick/ban players

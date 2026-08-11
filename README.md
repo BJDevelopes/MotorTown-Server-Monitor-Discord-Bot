@@ -1,50 +1,60 @@
 # Motortown Discord Bot
 
-A comprehensive Discord bot for monitoring and managing Motortown game servers. Control your server, track players, and manage your community directly from Discord!
+A comprehensive Discord bot for monitoring and managing Motor Town: Behind The Wheel game servers. Control your server, track players, and manage your community directly from Discord!
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Node.js](https://img.shields.io/badge/node-%3E%3D16.9.0-brightgreen)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen)](https://nodejs.org/)
 [![Discord.js](https://img.shields.io/badge/discord.js-v14-blue)](https://discord.js.org/)
 
 ## ✨ Features
 
 ### 🎮 Server Management
 - **Real-time Monitoring** - Check server status, player count, and version
-- **Player List** - See who's online with locations and vehicles
+- **Player List** - See who's online with locations, vehicles, and AFK status
+- **Player Search** - Find a player by name and get their ID with `/find`
 - **Delivery Tracking** - Monitor delivery sites and cargo
 - **Housing Info** - View property ownership and expiration
+- **Company Profit** - Read server economy figures with `/company`
 
 ### 👥 Player Administration
 - **Kick/Ban System** - Remove or ban players with optional duration and reasons
 - **Ban Management** - View and manage the server ban list
-- **Role Viewing** - See server admins and police officers
+- **In-Game Roles** - Grant and revoke admin/police roles with `/addrole` and `/removerole`
+- **Name Autocomplete** - Start typing a player's name and pick them from a live list; no copying IDs
 
 ### 🔒 Advanced Features
 - **Player Mapping** - Link game player IDs to Discord users with automatic nickname detection
 - **Dual Command System** - Use `/` slash commands or `!!` text commands
-- **Admin Permissions** - Secure Discord User ID-based permission system
+- **Admin Permissions** - Secure Discord User ID-based permission system, persisted across restarts
 - **Multi-Server Support** - Works across multiple Discord servers with per-server nicknames
 - **Server Announcements** - Send messages and announcements to the game server
+- **Raw API Access** - Call any Web API endpoint with `/apiraw` to explore new game updates
 
 ### 💬 Communication
 - **In-Game Chat** - Send colored messages to game server
 - **Announcements** - Broadcast important messages to all players
-- **Status Updates** - Bot shows "Playing Motortown" status
+- **Status Updates** - Bot shows live player count as its activity
 
-### 🏙️ Server Monitor Feature
-The bot includes a real-time server monitor that automatically creates and maintains a status dashboard in a designated Discord channel.
-- **Auto-Setup**: The bot automatically sends its own monitor message on the first run; no manual message ID copying is required.
-- **Persistence**: Saves message data to `monitor_data.json` to ensure it resumes editing the same message after a restart.
-- **Offline Tracking**: If the game server goes down, the embed turns red and displays the **Last Seen Online** timestamp.
-- **Efficient**: Updates every 60 seconds using a compact layout designed for high-population servers.
+### 🏙️ Server Monitor
+A real-time dashboard the bot maintains in a channel of your choosing.
+- **Auto-Setup**: The bot posts its own monitor message on first run; no manual message ID copying.
+- **Persistence**: Saves to `monitor_data.json` so it keeps editing the same message after a restart.
+- **Offline Tracking**: If the game server goes down, the embed turns red and shows **Last Seen Online**.
+- **Peak Tracking**: Displays the highest player count reached today.
+- **Efficient**: Refreshes on an interval you control, using a compact layout built for busy servers.
+
+### 🚪 Player Join/Leave Feed
+Optional live feed posting when players connect and disconnect. The Motor Town Web API still
+has no endpoint for reading in-game chat, so this is the closest thing to a live chat mirror.
+It survives server restarts without spamming, and stays quiet while the server is unreachable.
 
 ## 📋 Table of Contents
 
 - [Quick Start](#-quick-start)
-- [Installation](#-installation)
-- [Configuration](#-configuration)
+- [Configuration](#️-configuration)
 - [Commands](#-commands)
 - [Player Mapping](#-player-mapping)
+- [Security](#-security)
 - [Documentation](#-documentation)
 - [Troubleshooting](#-troubleshooting)
 - [Contributing](#-contributing)
@@ -54,15 +64,15 @@ The bot includes a real-time server monitor that automatically creates and maint
 
 ### Prerequisites
 
-- **Node.js** 16.9.0 or higher ([Download](https://nodejs.org/))
+- **Node.js** 18.0.0 or higher ([Download](https://nodejs.org/))
 - **Discord Bot Token** ([Create Bot](https://discord.com/developers/applications))
-- **Motortown Dedicated Server** with Web API enabled
+- **Motor Town Dedicated Server** with Web API enabled
 
 ### Installation
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/yourusername/motortown-discord-bot.git
+   git clone https://github.com/BJDevelopes/motortown-discord-bot.git
    cd motortown-discord-bot
    ```
 
@@ -74,15 +84,19 @@ The bot includes a real-time server monitor that automatically creates and maint
 3. **Configure the bot**
    ```bash
    cp .env.example .env
-   # Edit .env with your settings
    ```
+   Then edit `.env` and fill in your Discord token, client ID, and server API details.
+   The `.env` file must sit next to `bot.js`.
 
 4. **Start the bot**
    ```bash
    npm start
    ```
 
-See [Installation Guide](docs/INSTALLATION.md) for detailed setup instructions.
+If anything required is missing, the bot tells you exactly which variables to set and exits
+rather than failing with a cryptic error.
+
+See the [Installation Guide](docs/INSTALLATION.md) for detailed setup instructions.
 
 ## ⚙️ Configuration
 
@@ -91,9 +105,7 @@ See [Installation Guide](docs/INSTALLATION.md) for detailed setup instructions.
 1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
 2. Create a new application
 3. Go to "Bot" section and create a bot
-4. Enable these Privileged Gateway Intents:
-   - **Message Content Intent**
-   - **Server Members Intent** (for nickname features)
+4. Enable the **Message Content Intent** privileged gateway intent (needed for `!!` commands)
 5. Copy the bot token
 
 ### Game Server Setup
@@ -108,50 +120,49 @@ Edit your `DedicatedServerConfig.json`:
 }
 ```
 
-Make sure port 8080 is open in your firewall.
+> ⚠️ **Do not open the Web API port to the public internet.** The API is plain HTTP and the
+> password is sent in the URL in cleartext, so anyone who can see the traffic can take over
+> your server. Run the bot on the same machine or LAN as the game server, or put the API
+> behind an HTTPS reverse proxy. See [Security](#-security).
 
 ### Environment Variables
 
 ```env
-# Discord Configuration
+# Discord (required)
 DISCORD_TOKEN=your_discord_bot_token
 CLIENT_ID=your_application_client_id
 BOT_NICKNAME=Server Monitor
 
-# Server API Configuration
+# Server API (required)
 API_HOST=your.server.ip.address
 API_PORT=8080
 API_PASSWORD=your_api_password
+API_TIMEOUT=10000
 
-# Admin Users (comma-separated Discord User IDs)
+# Admin users (comma-separated Discord User IDs, required)
 ADMIN_USER_IDS=your_discord_user_id
 
-# Player Mapping (optional)
+# /join instructions (optional)
+JOIN_SERVER_NAME=Example Town
+JOIN_PASSWORD=
+JOIN_LINK=
+
+# Player mapping (optional)
 PLAYER_MAPPING=gameID:discordUserID|gameID:name
 
-# Server Monitor (optional)
-MONITOR_CHANNEL_ID=1235653767
+# Server monitor (optional)
+MONITOR_CHANNEL_ID=
+MONITOR_INTERVAL=60
 SERVER_NAME=Example Town
-LOGO_URL=https://example.com
+LOGO_URL=https://example.com/logo.png
 
+# Player join/leave feed (optional)
+PLAYER_FEED_CHANNEL_ID=
+PLAYER_FEED_INTERVAL=60
 ```
 
-See [Configuration Guide](docs/CONFIGURATION.md) for all options.
-
-
-### ⚙️ Configuration
-Add these variables to your `.env` file to enable the monitor:
-
-```bash
-# The ID of the Discord channel where the monitor message will live
-MONITOR_CHANNEL_ID=123456789012345678
-
-# The name of your server as it should appear in the title
-SERVER_NAME=Bjs Motor Town
-
-# (Optional) Link to your community or server logo
-LOGO_URL=[https://i.imgur.com/your-image.png](https://i.imgur.com/your-image.png)
-
+Every variable is documented in [.env.example](.env.example) and the
+[Configuration Guide](docs/CONFIGURATION.md).
 
 ## 📖 Commands
 
@@ -163,10 +174,12 @@ LOGO_URL=[https://i.imgur.com/your-image.png](https://i.imgur.com/your-image.png
 | `/join` | Get instructions to join the server | `/join` |
 | `/status` | Server status overview | `/status` |
 | `/players` | List online players | `/players` |
+| `/find` | Search for a player by name | `/find <name>` |
 | `/playercount` | Number of players online | `/playercount` |
 | `/version` | Server version | `/version` |
 | `/deliveries` | Delivery site information | `/deliveries` |
 | `/housing` | Housing information | `/housing` |
+| `/company` | Company profit figures | `/company [days]` |
 | `/banlist` | View banned players | `/banlist` |
 | `/admins` | List server administrators | `/admins` |
 | `/police` | List server police | `/police` |
@@ -181,29 +194,40 @@ LOGO_URL=[https://i.imgur.com/your-image.png](https://i.imgur.com/your-image.png
 | `/unban` | Unban a player | `/unban <unique_id>` |
 | `/announce` | Send server announcement | `/announce <message>` |
 | `/serverchat` | Send colored chat message | `/serverchat <message> [color]` |
-| `/addadmin` | Add bot admin (temporary) | `/addadmin @user` |
-| `/removeadmin` | Remove bot admin (temporary) | `/removeadmin @user` |
+| `/addrole` | Grant an in-game role | `/addrole <admin\|police> <unique_id>` |
+| `/removerole` | Revoke an in-game role | `/removerole <admin\|police> <unique_id>` |
+| `/apiraw` | Call any Web API endpoint | `/apiraw <endpoint> [key=value ...]` |
+| `/addadmin` | Add bot admin | `/addadmin @user` |
+| `/removeadmin` | Remove bot admin | `/removeadmin @user` |
 | `/listadmins` | View bot admins | `/listadmins` |
 | `/testmapping` | Test player mapping | `/testmapping <unique_id>` |
 
+**Tip:** `/kick`, `/ban`, `/unban`, `/addrole` and `/removerole` autocomplete player names from
+the live server, so you can pick a player instead of hunting for their ID. `/unban` autocompletes
+from the ban list.
+
 ### Text Commands
 
-All commands also work with `!!` prefix:
+All commands also work with the `!!` prefix:
 ```
 !!help
 !!status
 !!players
+!!find jerry
 !!kick 12345
+!!ban 12345 24 Cheating
+!!addrole police 12345
+!!apiraw /company/profit days=7
 ```
 
-Perfect for when slash commands are slow to load!
+Perfect for when slash commands are slow to load.
 
 ## 🎮 Player Mapping
 
 Link game player IDs to Discord users for easy identification:
 
 ```env
-PLAYER_MAPPING=12345:120343643381956608|67890:987654321098765432
+PLAYER_MAPPING=12345:120343643381956608|67890:Bob
 ```
 
 **Features:**
@@ -211,6 +235,7 @@ PLAYER_MAPPING=12345:120343643381956608|67890:987654321098765432
 - Server nickname priority (shows the name they use in your Discord)
 - Multi-server support (different nicknames per server)
 - Fallback to username if no nickname set
+- Applies to `/players`, `/housing`, `/find`, and the join/leave feed
 
 **Example:**
 
@@ -226,7 +251,24 @@ Jerry (Player_12345)  ← Shows their Discord server nickname!
 ID: 12345
 ```
 
-See [Player Mapping Guide](docs/PLAYER_MAPPING.md) for detailed setup.
+See the [Player Mapping Guide](docs/PLAYER_MAPPING.md) for detailed setup.
+
+## 🔐 Security
+
+The Motor Town Web API has no encryption. The password is sent as a plain query parameter over
+plain HTTP on every single request, which means anyone able to observe the traffic can read it
+and then issue their own kick, ban, and announce commands against your server.
+
+**Recommended setup:**
+- Run the bot on the same machine as the dedicated server and point `API_HOST` at `127.0.0.1`.
+- If the bot runs elsewhere, keep both ends on a private network or VPN.
+- Do not forward the Web API port on your router.
+- If you must expose it, put an HTTPS reverse proxy in front and restrict access by IP.
+- Newer server builds support a `HostWebAPIDisabledCommands` option in `DedicatedServerConfig.json`
+  to switch off individual API commands you don't need.
+
+Your `.env` holds a live Discord token and your API password. It is gitignored; keep it that way,
+and rotate both if it is ever exposed.
 
 ## 📚 Documentation
 
@@ -245,17 +287,25 @@ See [Player Mapping Guide](docs/PLAYER_MAPPING.md) for detailed setup.
 - Check bot has correct permissions in Discord server
 - Verify bot is online
 
+### "Invalid password" on announce, chat, kick or ban
+This was a bug in versions before 2.0.0: parameters for POST requests were sent in the request
+body, but the Motor Town API only reads them from the query string. Update to the latest version.
+If it persists, confirm `API_PASSWORD` matches `HostWebAPIServerPassword` exactly.
+
 ### Can't connect to game server
 - Check `API_HOST` and `API_PORT` are correct
 - Verify game server Web API is enabled
-- Ensure firewall port is open
+- Ensure the bot can reach that host and port
+
+### A command says the endpoint isn't available
+Some endpoints (like `/company/profit`) only exist on newer dedicated server builds. Update your
+server, or use `/apiraw <endpoint>` to check what your build actually responds with.
 
 ### Player nicknames not showing
-- Enable **Server Members Intent** in Discord Developer Portal
 - Verify users are members of your Discord server
 - Use `/testmapping <id>` to diagnose specific issues
 
-See [Troubleshooting Guide](docs/TROUBLESHOOTING.md) for more help.
+See the [Troubleshooting Guide](docs/TROUBLESHOOTING.md) for more help.
 
 ## 🤝 Contributing
 
@@ -269,20 +319,14 @@ Contributions are welcome! Here's how you can help:
 ### Development Setup
 
 ```bash
-# Clone the repo
-git clone https://github.com/yourusername/motortown-discord-bot.git
+git clone https://github.com/BJDevelopes/motortown-discord-bot.git
 cd motortown-discord-bot
-
-# Install dependencies
 npm install
-
-# Create .env file
 cp .env.example .env
-# Edit .env with your test server details
-
-# Run in development mode with auto-restart
 npm run dev
 ```
+
+`npm run dev` runs the bot under nodemon and restarts it whenever you save.
 
 ## 📝 Changelog
 
@@ -292,7 +336,8 @@ See [CHANGELOG.md](CHANGELOG.md) for version history and updates.
 
 - **Discord.js** - Discord API library
 - **Axios** - HTTP client for API requests
-- **Motortown** - The game this bot is built for
+- **Motor Town: Behind The Wheel** - The game this bot is built for
+- **[Motor Town Web API docs](https://docs.motortown.info/)** - Community API documentation
 
 ## 📄 License
 
@@ -303,11 +348,11 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Documentation**: [Full documentation](docs/)
 - **Issues**: [Report a bug](https://github.com/BJDevelopes/motortown-discord-bot/issues)
 - **Discussions**: [Ask questions](https://github.com/BJDevelopes/motortown-discord-bot/discussions)
-- **Motortown**: [Game Website](https://motortown-game.com/)
+- **Web API Reference**: [docs.motortown.info](https://docs.motortown.info/)
 
 ## ⚠️ Disclaimer
 
-This is an unofficial community-made bot. Not affiliated with or endorsed by the Motortown developers.
+This is an unofficial community-made bot. Not affiliated with or endorsed by the Motor Town developers.
 
 ## 🌟 Support
 
@@ -320,4 +365,4 @@ If you find this bot useful, please consider:
 
 ---
 
-**Made with ❤️ for the Motortown community**
+**Made with ❤️ for the Motor Town community**

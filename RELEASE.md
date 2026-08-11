@@ -46,7 +46,7 @@
 
 ## Version Information
 
-**Current Version:** 1.5.2
+**Current Version:** 2.0.0
 
 **Release Name:** Server Nickname Priority & Enhanced Diagnostics
 

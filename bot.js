@@ -1,9 +1,13 @@
-const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes, MessageFlags, Events } = require('discord.js');
 const axios = require('axios');
-require('dotenv').config();
-const fs = require('fs'); 
-const MONITOR_DATA_FILE = './monitor_data.json';
-const {ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const path = require('path');
+const fs = require('fs');
+
+// Load .env from next to this file so the bot works regardless of the working directory.
+require('dotenv').config({ path: path.join(__dirname, '.env'), quiet: true });
+
+const MONITOR_DATA_FILE = path.join(__dirname, 'monitor_data.json');
+const ADMIN_DATA_FILE = path.join(__dirname, 'admin_data.json');
 
 const client = new Client({
     intents: [
@@ -19,15 +23,66 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const API_HOST = process.env.API_HOST;
 const API_PASSWORD = process.env.API_PASSWORD;
 const API_PORT = process.env.API_PORT || '8080';
+const API_TIMEOUT = parseInt(process.env.API_TIMEOUT || '10000', 10);
 const BOT_NICKNAME = process.env.BOT_NICKNAME || null;
 const CHAT_CHANNEL_ID = process.env.CHAT_CHANNEL_ID || null;
-const MONITOR_CHANNEL_ID = process.env.MONITOR_CHANNEL_ID;
-const MONITOR_MESSAGE_ID = process.env.MONITOR_MESSAGE_ID; // You'll get this after the first run
+const MONITOR_CHANNEL_ID = process.env.MONITOR_CHANNEL_ID || null;
+const MONITOR_INTERVAL_MS = parseInt(process.env.MONITOR_INTERVAL || '60', 10) * 1000;
+const PLAYER_FEED_CHANNEL_ID = process.env.PLAYER_FEED_CHANNEL_ID || null;
+const PLAYER_FEED_INTERVAL_MS = parseInt(process.env.PLAYER_FEED_INTERVAL || '60', 10) * 1000;
 
-// Admin user IDs (comma-separated in .env)
-const ADMIN_USER_IDS = process.env.ADMIN_USER_IDS 
-    ? process.env.ADMIN_USER_IDS.split(',').map(id => id.trim())
+// /join command details
+const JOIN_SERVER_NAME = process.env.JOIN_SERVER_NAME || process.env.SERVER_NAME || null;
+const JOIN_PASSWORD = process.env.JOIN_PASSWORD || null;
+const JOIN_LINK = process.env.JOIN_LINK || null;
+
+// Fail fast with an actionable message instead of a confusing crash later.
+const missingConfig = Object.entries({ DISCORD_TOKEN, CLIENT_ID, API_HOST, API_PASSWORD })
+    .filter(([, value]) => !value)
+    .map(([key]) => key);
+
+if (missingConfig.length > 0) {
+    console.error('❌ Missing required configuration:');
+    for (const key of missingConfig) {
+        console.error(`   - ${key}`);
+    }
+    console.error(`\nCreate a .env file next to bot.js (copy .env.example) and fill these in.`);
+    console.error(`Expected location: ${path.join(__dirname, '.env')}`);
+    process.exit(1);
+}
+
+// Admin user IDs (comma-separated in .env, plus any added at runtime via /addadmin)
+const ADMIN_USER_IDS = process.env.ADMIN_USER_IDS
+    ? process.env.ADMIN_USER_IDS.split(',').map(id => id.trim()).filter(id => id)
     : [];
+
+// Admins added with /addadmin persist here so they survive a restart.
+function loadPersistedAdmins() {
+    try {
+        if (!fs.existsSync(ADMIN_DATA_FILE)) return;
+        const saved = JSON.parse(fs.readFileSync(ADMIN_DATA_FILE, 'utf8'));
+        for (const id of saved.admins || []) {
+            if (!ADMIN_USER_IDS.includes(id)) ADMIN_USER_IDS.push(id);
+        }
+    } catch (error) {
+        console.error('Failed to load persisted admins:', error.message);
+    }
+}
+
+function savePersistedAdmins() {
+    // Only persist admins that aren't already in .env, so removing one from .env actually removes it.
+    const fromEnv = process.env.ADMIN_USER_IDS
+        ? process.env.ADMIN_USER_IDS.split(',').map(id => id.trim()).filter(id => id)
+        : [];
+    const runtimeOnly = ADMIN_USER_IDS.filter(id => !fromEnv.includes(id));
+    try {
+        fs.writeFileSync(ADMIN_DATA_FILE, JSON.stringify({ admins: runtimeOnly }, null, 2));
+    } catch (error) {
+        console.error('Failed to save admins:', error.message);
+    }
+}
+
+loadPersistedAdmins();
 
 // Player mapping (unique_id:name pairs, pipe-separated in .env)
 const PLAYER_MAPPING = new Map();
@@ -43,6 +98,12 @@ if (process.env.PLAYER_MAPPING) {
 
 // Construct base URL
 const BASE_URL = `http://${API_HOST}:${API_PORT}`;
+
+// Commands that require the caller to be a bot admin
+const ADMIN_COMMANDS = [
+    'kick', 'ban', 'unban', 'announce', 'serverchat',
+    'addrole', 'removerole', 'addadmin', 'removeadmin', 'testmapping', 'apiraw'
+];
 
 // Helper function to check if user is admin
 function isAdmin(userId) {
@@ -102,48 +163,81 @@ async function getPlayerDisplayName(uniqueId, originalName, guildId = null) {
 
 // Server Monitor Function
 
+// Kept in memory so a failed write to disk can't make the monitor post a duplicate message.
+let monitorState = null;
+
+function loadMonitorState() {
+    if (monitorState) return monitorState;
+
+    monitorState = { messageId: null, lastOnline: 'Never' };
+    try {
+        if (fs.existsSync(MONITOR_DATA_FILE)) {
+            monitorState = { ...monitorState, ...JSON.parse(fs.readFileSync(MONITOR_DATA_FILE, 'utf8')) };
+        }
+    } catch (error) {
+        console.error('Failed to read monitor data, starting fresh:', error.message);
+    }
+    return monitorState;
+}
+
+function saveMonitorState() {
+    try {
+        fs.writeFileSync(MONITOR_DATA_FILE, JSON.stringify(monitorState, null, 2));
+    } catch (error) {
+        console.error('Failed to save monitor data:', error.message);
+    }
+}
+
 async function refreshServerMonitor() {
-    const channelId = process.env.MONITOR_CHANNEL_ID;
-    if (!channelId) return;
+    if (!MONITOR_CHANNEL_ID) return;
 
     try {
-        const channel = await client.channels.fetch(channelId);
-        let message = null;
-
-        // 1. Data Loading & API Fetch
-        let savedData = { messageId: null, lastOnline: 'Never' };
-        if (fs.existsSync(MONITOR_DATA_FILE)) {
-            savedData = JSON.parse(fs.readFileSync(MONITOR_DATA_FILE));
+        const channel = await client.channels.fetch(MONITOR_CHANNEL_ID);
+        if (!channel || !channel.isTextBased()) {
+            console.error(`Monitor channel ${MONITOR_CHANNEL_ID} is not a text channel.`);
+            return;
         }
 
-        const baseUrl = `http://${API_HOST}:${API_PORT}`;
+        const savedData = loadMonitorState();
+
+        // 1. API Fetch — only count and version, to stay cheap at a 60s cadence
         let apiData;
         try {
-            // We only need count and version now to keep it efficient
             const [countRes, versionRes] = await Promise.all([
-                axios.get(`${baseUrl}/player/count/?password=${API_PASSWORD}`, { timeout: 3000 }),
-                axios.get(`${baseUrl}/version/?password=${API_PASSWORD}`, { timeout: 3000 })
+                apiCall('/player/count', 'GET'),
+                apiCall('/version', 'GET')
             ]);
-            
-            apiData = { 
-                online: true, 
-                count: countRes.data.data.num_players, 
-                version: versionRes.data.data.version 
+
+            apiData = {
+                online: true,
+                count: countRes.data.num_players,
+                version: versionRes.data.version
             };
-            
+
+            // Track the daily peak so the dashboard shows how busy the server actually gets.
+            const today = new Date().toLocaleDateString();
+            if (savedData.peakDate !== today) {
+                savedData.peakDate = today;
+                savedData.peakCount = 0;
+            }
+            if (apiData.count > (savedData.peakCount || 0)) {
+                savedData.peakCount = apiData.count;
+            }
+
             savedData.lastOnline = new Date().toLocaleString();
-            fs.writeFileSync(MONITOR_DATA_FILE, JSON.stringify(savedData));
-        } catch (e) { 
-            apiData = { online: false }; 
+            saveMonitorState();
+        } catch (e) {
+            apiData = { online: false };
         }
 
         // 2. Build the Compact Styled Embed
-        const serverName = process.env.SERVER_NAME || "Motor Town Server";
+        const serverName = process.env.SERVER_NAME || 'Motor Town Server';
+        const refreshSeconds = Math.round(MONITOR_INTERVAL_MS / 1000);
         const monitorEmbed = new EmbedBuilder()
             .setTitle(`**${serverName}**`)
             .setThumbnail(process.env.LOGO_URL || null)
             .setTimestamp()
-            .setFooter({ text: 'Auto-refreshes every 60s' });
+            .setFooter({ text: `Auto-refreshes every ${refreshSeconds}s` });
 
         if (apiData.online) {
             monitorEmbed
@@ -151,7 +245,8 @@ async function refreshServerMonitor() {
                 .addFields(
                     { name: '👥 Players', value: `\`${apiData.count} online\``, inline: true },
                     { name: '📡 Status', value: '🟢 **Online**', inline: true },
-                    { name: '⚙️ Version', value: `\`${apiData.version}\``, inline: true }
+                    { name: '⚙️ Version', value: `\`${apiData.version}\``, inline: true },
+                    { name: '📈 Peak Today', value: `\`${savedData.peakCount || apiData.count}\``, inline: true }
                 );
         } else {
             monitorEmbed
@@ -164,6 +259,7 @@ async function refreshServerMonitor() {
         }
 
         // 3. Persistence & Sending
+        let message = null;
         if (savedData.messageId) {
             try { message = await channel.messages.fetch(savedData.messageId); } catch (e) {}
         }
@@ -171,47 +267,165 @@ async function refreshServerMonitor() {
         if (!message) {
             message = await channel.send({ embeds: [monitorEmbed] });
             savedData.messageId = message.id;
-            fs.writeFileSync(MONITOR_DATA_FILE, JSON.stringify(savedData));
+            saveMonitorState();
         } else {
             await message.edit({ embeds: [monitorEmbed], components: [] });
         }
 
-    } catch (error) { 
-        console.error("Monitor Styling Error:", error.message); 
+    } catch (error) {
+        console.error('Monitor Error:', error.message);
     }
 }
 
 
+// Player join/leave feed
+//
+// The Web API still has no way to read in-game chat, so the next best live feed is
+// polling the player list and reporting the difference.
+let knownPlayers = null; // null until the first successful poll, so a restart doesn't announce everyone
+
+async function pollPlayerFeed() {
+    if (!PLAYER_FEED_CHANNEL_ID) return;
+
+    let players;
+    try {
+        const result = await apiCall('/player/list', 'GET');
+        if (!result.succeeded) return;
+        players = toArray(result.data);
+    } catch (error) {
+        // Server down or unreachable — hold the last known roster rather than
+        // reporting every player as having left.
+        return;
+    }
+
+    const current = new Map(players.map(p => [String(p.unique_id), p]));
+
+    if (knownPlayers === null) {
+        knownPlayers = current;
+        console.log(`Player feed primed with ${current.size} player(s) online.`);
+        return;
+    }
+
+    const joined = [...current.values()].filter(p => !knownPlayers.has(String(p.unique_id)));
+    const left = [...knownPlayers.values()].filter(p => !current.has(String(p.unique_id)));
+    knownPlayers = current;
+
+    if (joined.length === 0 && left.length === 0) return;
+
+    try {
+        const channel = await client.channels.fetch(PLAYER_FEED_CHANNEL_ID);
+        if (!channel || !channel.isTextBased()) return;
+
+        const guildId = channel.guild?.id || null;
+        const lines = [];
+
+        for (const player of joined) {
+            const name = await getPlayerDisplayName(player.unique_id, player.name, guildId);
+            lines.push(`🟢 **${name}** joined`);
+        }
+        for (const player of left) {
+            const name = await getPlayerDisplayName(player.unique_id, player.name, guildId);
+            lines.push(`🔴 **${name}** left`);
+        }
+
+        const list = buildEmbedList(lines);
+        const embed = new EmbedBuilder()
+            .setColor(joined.length >= left.length ? 0x2ecc71 : 0xe74c3c)
+            .setDescription(list.text)
+            .setFooter({ text: `${current.size} player${current.size === 1 ? '' : 's'} online` })
+            .setTimestamp();
+
+        await channel.send({ embeds: [embed] });
+    } catch (error) {
+        console.error('Player feed error:', error.message);
+    }
+}
+
 // Helper function to make API calls
 async function apiCall(endpoint, method = 'GET', params = {}) {
     try {
-        const url = `${BASE_URL}${endpoint}`;
-        const config = {
+        // The Motor Town Web API reads every parameter from the query string, including on
+        // POST requests. Sending them as a form body makes the server see no password at all
+        // and reject the call with "Invalid password". axios handles the URL encoding.
+        const response = await axios({
             method: method,
-            url: url,
-        };
-
-        // For GET requests, use query parameters
-        if (method === 'GET') {
-            config.params = { password: API_PASSWORD, ...params };
-        } else {
-            // For POST requests, use URLSearchParams to properly encode the body
-            const formData = new URLSearchParams();
-            formData.append('password', API_PASSWORD);
-            for (const [key, value] of Object.entries(params)) {
-                formData.append(key, value);
-            }
-            config.data = formData;
-            config.headers = {
-                'Content-Type': 'application/x-www-form-urlencoded'
-            };
-        }
-
-        const response = await axios(config);
+            url: `${BASE_URL}${endpoint}`,
+            params: { password: API_PASSWORD, ...params },
+            timeout: API_TIMEOUT
+        });
         return response.data;
     } catch (error) {
-        console.error(`API Error: ${error.message}`);
+        console.error(`API Error (${method} ${endpoint}): ${error.message}`);
         throw error;
+    }
+}
+
+// Turns "X=2590.089 Y=1682.984 Z=98.927" into "X=2590 Y=1683" for readable embeds.
+function formatLocation(location) {
+    if (!location) return 'Unknown';
+    const coords = String(location).match(/-?\d+(\.\d+)?/g);
+    if (!coords || coords.length < 2) return String(location);
+    return `X=${Math.round(coords[0])} Y=${Math.round(coords[1])}`;
+}
+
+// Discord rejects an embed description over 4096 characters and an embed with more than 25
+// fields. Both limits are easy to hit on a busy server, so list-style commands build a
+// description that fits and report whatever didn't make it.
+const EMBED_DESCRIPTION_LIMIT = 3900;
+
+function buildEmbedList(entries) {
+    const lines = [];
+    let length = 0;
+
+    for (const entry of entries) {
+        if (length + entry.length + 1 > EMBED_DESCRIPTION_LIMIT) break;
+        lines.push(entry);
+        length += entry.length + 1;
+    }
+
+    return {
+        text: lines.join('\n'),
+        shown: lines.length,
+        omitted: entries.length - lines.length
+    };
+}
+
+// Normalizes the API's object-keyed collections ({"0": {...}, "1": {...}}) into an array.
+function toArray(collection) {
+    if (!collection) return [];
+    return Array.isArray(collection) ? collection : Object.values(collection);
+}
+
+// Autocomplete fires on every keystroke, so results are cached briefly to keep the
+// game server from being hammered while an admin types a name.
+const listCache = new Map();
+const LIST_CACHE_MS = 5000;
+
+async function getCachedList(endpoint, params = {}) {
+    const key = `${endpoint}?${JSON.stringify(params)}`;
+    const cached = listCache.get(key);
+    if (cached && Date.now() - cached.at < LIST_CACHE_MS) return cached.value;
+
+    const result = await apiCall(endpoint, 'GET', params);
+    const value = result.succeeded ? toArray(result.data) : [];
+    listCache.set(key, { at: Date.now(), value });
+    return value;
+}
+
+// Turns raw errors into something a Discord admin can act on.
+function describeError(error) {
+    if (error.response?.data?.message) return error.response.data.message;
+
+    switch (error.code) {
+        case 'ECONNREFUSED':
+            return `Cannot reach the game server at ${API_HOST}:${API_PORT}. Is the server running with the Web API enabled?`;
+        case 'ETIMEDOUT':
+        case 'ECONNABORTED':
+            return `The game server at ${API_HOST}:${API_PORT} did not respond in time.`;
+        case 'ENOTFOUND':
+            return `Could not resolve the host \`${API_HOST}\`. Check API_HOST in your .env file.`;
+        default:
+            return error.message || 'An error occurred';
     }
 }
 
@@ -262,20 +476,30 @@ const commands = [
         .setDescription('Get list of server police'),
     
     new SlashCommandBuilder()
+        .setName('find')
+        .setDescription('Search for an online player by name and get their unique ID')
+        .addStringOption(option =>
+            option.setName('name')
+                .setDescription('Full or partial player name')
+                .setRequired(true)),
+
+    new SlashCommandBuilder()
         .setName('kick')
         .setDescription('Kick a player from the server')
         .addStringOption(option =>
             option.setName('unique_id')
-                .setDescription('Player unique ID')
-                .setRequired(true)),
-    
+                .setDescription('Player unique ID (start typing a name to search)')
+                .setRequired(true)
+                .setAutocomplete(true)),
+
     new SlashCommandBuilder()
         .setName('ban')
         .setDescription('Ban a player from the server')
         .addStringOption(option =>
             option.setName('unique_id')
-                .setDescription('Player unique ID')
-                .setRequired(true))
+                .setDescription('Player unique ID (start typing a name to search)')
+                .setRequired(true)
+                .setAutocomplete(true))
         .addIntegerOption(option =>
             option.setName('hours')
                 .setDescription('Ban duration in hours (leave empty for permanent)')
@@ -284,14 +508,15 @@ const commands = [
             option.setName('reason')
                 .setDescription('Reason for ban')
                 .setRequired(false)),
-    
+
     new SlashCommandBuilder()
         .setName('unban')
         .setDescription('Unban a player')
         .addStringOption(option =>
             option.setName('unique_id')
-                .setDescription('Player unique ID')
-                .setRequired(true)),
+                .setDescription('Player unique ID (start typing a name to search the ban list)')
+                .setRequired(true)
+                .setAutocomplete(true)),
     
     new SlashCommandBuilder()
         .setName('announce')
@@ -313,6 +538,60 @@ const commands = [
                 .setDescription('Text color in hex (e.g., FF00FF)')
                 .setRequired(false)),
     
+    new SlashCommandBuilder()
+        .setName('addrole')
+        .setDescription('Grant a player the admin or police role on the game server')
+        .addStringOption(option =>
+            option.setName('role')
+                .setDescription('Role to grant')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'admin', value: 'admin' },
+                    { name: 'police', value: 'police' }
+                ))
+        .addStringOption(option =>
+            option.setName('unique_id')
+                .setDescription('Player unique ID (start typing a name to search)')
+                .setRequired(true)
+                .setAutocomplete(true)),
+
+    new SlashCommandBuilder()
+        .setName('removerole')
+        .setDescription('Revoke a player\'s admin or police role on the game server')
+        .addStringOption(option =>
+            option.setName('role')
+                .setDescription('Role to revoke')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'admin', value: 'admin' },
+                    { name: 'police', value: 'police' }
+                ))
+        .addStringOption(option =>
+            option.setName('unique_id')
+                .setDescription('Player unique ID (start typing a name to search)')
+                .setRequired(true)
+                .setAutocomplete(true)),
+
+    new SlashCommandBuilder()
+        .setName('company')
+        .setDescription('Show company profit figures from the server economy')
+        .addIntegerOption(option =>
+            option.setName('days')
+                .setDescription('Number of days to report on (default 7)')
+                .setRequired(false)),
+
+    new SlashCommandBuilder()
+        .setName('apiraw')
+        .setDescription('Call any Web API endpoint directly and show the raw response (admin only)')
+        .addStringOption(option =>
+            option.setName('endpoint')
+                .setDescription('Endpoint path, e.g. /player/list or /company/profit')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('params')
+                .setDescription('Extra query params as key=value pairs, e.g. days=7 role=admin')
+                .setRequired(false)),
+
     new SlashCommandBuilder()
         .setName('listadmins')
         .setDescription('List Discord users who can use admin commands'),
@@ -356,13 +635,15 @@ const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
             Routes.applicationCommands(CLIENT_ID),
             { body: commands },
         );
-        console.log('Successfully reloaded application (/) commands.');
+        console.log(`Successfully reloaded ${commands.length} application (/) commands.`);
     } catch (error) {
-        console.error(error);
+        console.error('❌ Failed to register slash commands:', error.message);
+        console.error('   Check that CLIENT_ID matches your bot\'s application ID and DISCORD_TOKEN is valid.');
+        console.error('   The bot will still start; !! text commands will work in the meantime.');
     }
 })();
 
-client.once('ready', async () => {
+client.once(Events.ClientReady, async () => {
     console.log(`Logged in as ${client.user.tag}!`);
     console.log(`Connected to API: ${BASE_URL}`);
     console.log(`Admin users loaded: ${ADMIN_USER_IDS.length}`);
@@ -417,13 +698,24 @@ client.once('ready', async () => {
     await updateBotStatus();
     console.log('Bot activity set with player count');
 
-    // Initial run
-    refreshServerMonitor()
-    
     // Update status every 60 seconds
     setInterval(updateBotStatus, 60000);
 
-    
+    // Server monitor: run once now, then keep it refreshing on its own interval
+    if (MONITOR_CHANNEL_ID) {
+        await refreshServerMonitor();
+        setInterval(refreshServerMonitor, MONITOR_INTERVAL_MS);
+        console.log(`Server monitor active in channel ${MONITOR_CHANNEL_ID} (every ${Math.round(MONITOR_INTERVAL_MS / 1000)}s)`);
+    }
+
+    // Player join/leave feed
+    if (PLAYER_FEED_CHANNEL_ID) {
+        await pollPlayerFeed();
+        setInterval(pollPlayerFeed, PLAYER_FEED_INTERVAL_MS);
+        console.log(`Player feed active in channel ${PLAYER_FEED_CHANNEL_ID} (every ${Math.round(PLAYER_FEED_INTERVAL_MS / 1000)}s)`);
+    }
+
+
     // Set bot nickname in all guilds if configured
     if (BOT_NICKNAME) {
         console.log(`Setting bot nickname to: ${BOT_NICKNAME}`);
@@ -483,7 +775,7 @@ async function sendChatToDiscord(message, username = 'Server') {
 // For now, this serves as a placeholder for the CHAT_CHANNEL_ID feature
 
 // Set nickname when bot joins a new server
-client.on('guildCreate', async (guild) => {
+client.on(Events.GuildCreate, async (guild) => {
     console.log(`Joined new guild: ${guild.name}`);
     
     if (BOT_NICKNAME) {
@@ -497,19 +789,41 @@ client.on('guildCreate', async (guild) => {
     }
 });
 
-client.on('interactionCreate', async interaction => {
+// Suggests live players (or banned players for /unban) as an admin types a name,
+// so nobody has to copy unique IDs around by hand.
+client.on(Events.InteractionCreate, async interaction => {
+    if (!interaction.isAutocomplete()) return;
+
+    try {
+        const usesBanList = interaction.commandName === 'unban';
+        const players = await getCachedList(usesBanList ? '/player/banlist' : '/player/list');
+        const typed = (interaction.options.getFocused() || '').toLowerCase();
+
+        const choices = players
+            .filter(p => !typed || (p.name || '').toLowerCase().includes(typed) || String(p.unique_id).includes(typed))
+            .slice(0, 25) // Discord allows at most 25 autocomplete choices
+            .map(p => ({
+                name: `${p.name || 'Unknown'} (${p.unique_id})`.slice(0, 100),
+                value: String(p.unique_id)
+            }));
+
+        await interaction.respond(choices);
+    } catch (error) {
+        // An unreachable server shouldn't make the option box hang — just offer nothing.
+        try { await interaction.respond([]); } catch (e) {}
+    }
+});
+
+client.on(Events.InteractionCreate, async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
     const { commandName } = interaction;
 
-    // Define admin-only commands
-    const adminCommands = ['kick', 'ban', 'unban', 'announce', 'serverchat', 'addadmin', 'removeadmin', 'testmapping'];
-
     // Check if command requires admin and user is not admin
-    if (adminCommands.includes(commandName) && !isAdmin(interaction.user.id)) {
+    if (ADMIN_COMMANDS.includes(commandName) && !isAdmin(interaction.user.id)) {
         await interaction.reply({
             content: '❌ You do not have permission to use this command.',
-            ephemeral: true
+            flags: MessageFlags.Ephemeral
         });
         return;
     }
@@ -529,6 +843,15 @@ client.on('interactionCreate', async interaction => {
                 break;
             case 'players':
                 await handlePlayers(interaction);
+                break;
+            case 'find':
+                await handleFind(interaction);
+                break;
+            case 'company':
+                await handleCompany(interaction);
+                break;
+            case 'apiraw':
+                await handleApiRaw(interaction);
                 break;
             case 'playercount':
                 await handlePlayerCount(interaction);
@@ -566,6 +889,12 @@ client.on('interactionCreate', async interaction => {
             case 'serverchat':
                 await handleServerChat(interaction);
                 break;
+            case 'addrole':
+                await handleRoleChange(interaction, 'add');
+                break;
+            case 'removerole':
+                await handleRoleChange(interaction, 'remove');
+                break;
             case 'listadmins':
                 await handleListAdmins(interaction);
                 break;
@@ -586,13 +915,16 @@ client.on('interactionCreate', async interaction => {
         }
     } catch (error) {
         console.error(`Error handling ${commandName}:`, error);
-        const errorMessage = error.response?.data?.message || error.message || 'An error occurred';
-        await interaction.editReply(`Error: ${errorMessage}`);
+        try {
+            await interaction.editReply(`❌ ${describeError(error)}`);
+        } catch (replyError) {
+            console.error('Could not deliver error message to Discord:', replyError.message);
+        }
     }
 });
 
 // Message command handler for !! prefix (backup when slash commands are slow)
-client.on('messageCreate', async message => {
+client.on(Events.MessageCreate, async message => {
     // Ignore bot messages
     if (message.author.bot) return;
     
@@ -603,24 +935,36 @@ client.on('messageCreate', async message => {
     const args = message.content.slice(2).trim().split(/ +/);
     const commandName = args.shift().toLowerCase();
 
-    // Define admin-only commands
-    const adminCommands = ['kick', 'ban', 'unban', 'announce', 'serverchat', 'addadmin', 'removeadmin', 'testmapping'];
-
     // Check if command requires admin and user is not admin
-    if (adminCommands.includes(commandName) && !isAdmin(message.author.id)) {
+    if (ADMIN_COMMANDS.includes(commandName) && !isAdmin(message.author.id)) {
         await message.reply('❌ You do not have permission to use this command.');
         return;
     }
 
     try {
+        // Role commands take the role first (!!addrole admin 12345), everything else
+        // that takes an ID takes it first (!!ban 12345 24 Cheating).
+        const isRoleCommand = commandName === 'addrole' || commandName === 'removerole';
+        const role = isRoleCommand ? (args[0] || '').toLowerCase() : null;
+        const uniqueId = isRoleCommand ? args[1] : args[0];
+
+        // `hours` is optional, so treat arg 1 as a duration only when it's actually a number.
+        // Otherwise the rest of the line is the reason (!!ban 12345 Cheating).
+        const hours = /^\d+$/.test(args[1] || '') ? parseInt(args[1], 10) : null;
+        const reason = (hours !== null ? args.slice(2) : args.slice(1)).join(' ') || null;
+
         // Create a mock interaction object for compatibility with existing handlers
         const mockInteraction = {
             user: message.author,
             options: {
                 getString: (name) => {
-                    if (name === 'unique_id') return args[0] || null;
+                    if (name === 'unique_id') return uniqueId || null;
+                    if (name === 'role') return role;
                     if (name === 'message') return args.join(' ') || null;
-                    if (name === 'reason' && args.length > 2) return args.slice(2).join(' ');
+                    if (name === 'reason') return reason;
+                    if (name === 'name') return args.join(' ') || null;
+                    if (name === 'endpoint') return args[0] || null;
+                    if (name === 'params') return args.slice(1).join(' ') || null;
                     if (name === 'color' && args.length > 0) {
                         const lastArg = args[args.length - 1];
                         if (/^[0-9A-Fa-f]{6}$/.test(lastArg)) return lastArg;
@@ -628,18 +972,17 @@ client.on('messageCreate', async message => {
                     return null;
                 },
                 getInteger: (name) => {
-                    if (name === 'hours' && args[1]) {
-                        const hours = parseInt(args[1]);
-                        return isNaN(hours) ? null : hours;
-                    }
+                    if (name === 'hours') return hours;
+                    if (name === 'days') return /^\d+$/.test(args[0] || '') ? parseInt(args[0], 10) : null;
                     return null;
                 },
-                getUser: (name) => {
-                    // For user mentions in !! commands
-                    const mention = args[0];
-                    if (mention && mention.startsWith('<@') && mention.endsWith('>')) {
-                        const userId = mention.slice(2, -1).replace('!', '');
-                        return message.guild.members.cache.get(userId)?.user || null;
+                getUser: () => {
+                    // Discord already parsed any mentions for us, so this handles
+                    // <@id>, <@!id> and plain user IDs alike.
+                    const mentioned = message.mentions.users.first();
+                    if (mentioned) return mentioned;
+                    if (/^\d{17,19}$/.test(args[0] || '')) {
+                        return client.users.cache.get(args[0]) || null;
                     }
                     return null;
                 }
@@ -666,6 +1009,23 @@ client.on('messageCreate', async message => {
                 break;
             case 'players':
                 await handlePlayers(mockInteraction);
+                break;
+            case 'find':
+                if (!args[0]) {
+                    await message.reply('❌ Usage: `!!find <name>`\nExample: `!!find jerry`');
+                    return;
+                }
+                await handleFind(mockInteraction);
+                break;
+            case 'company':
+                await handleCompany(mockInteraction);
+                break;
+            case 'apiraw':
+                if (!args[0]) {
+                    await message.reply('❌ Usage: `!!apiraw <endpoint> [key=value ...]`\nExample: `!!apiraw /company/profit days=7`');
+                    return;
+                }
+                await handleApiRaw(mockInteraction);
                 break;
             case 'playercount':
                 await handlePlayerCount(mockInteraction);
@@ -735,6 +1095,14 @@ client.on('messageCreate', async message => {
                 };
                 await handleServerChat(mockInteraction);
                 break;
+            case 'addrole':
+            case 'removerole':
+                if (!['admin', 'police'].includes(role) || !uniqueId) {
+                    await message.reply(`❌ Usage: \`!!${commandName} <admin|police> <unique_id>\`\nExample: \`!!${commandName} police 12345\``);
+                    return;
+                }
+                await handleRoleChange(mockInteraction, commandName === 'addrole' ? 'add' : 'remove');
+                break;
             case 'listadmins':
                 await handleListAdmins(mockInteraction);
                 break;
@@ -767,8 +1135,11 @@ client.on('messageCreate', async message => {
         }
     } catch (error) {
         console.error(`Error handling !!${commandName}:`, error);
-        const errorMessage = error.response?.data?.message || error.message || 'An error occurred';
-        await message.reply(`❌ Error: ${errorMessage}`);
+        try {
+            await message.reply(`❌ ${describeError(error)}`);
+        } catch (replyError) {
+            console.error('Could not deliver error message to Discord:', replyError.message);
+        }
     }
 });
 
@@ -790,9 +1161,11 @@ async function handleHelp(interaction) {
             '`/status` - Complete server status overview\n' +
             '`/playercount` - Number of players online\n' +
             '`/players` - Detailed list of online players\n' +
+            '`/find <name>` - Search for a player and get their ID\n' +
             '`/version` - Server version information\n' +
             '`/deliveries` - View delivery sites and cargo\n' +
             '`/housing` - View housing ownership info\n' +
+            '`/company [days]` - Company profit figures\n' +
             '`/banlist` - List of banned players',
         inline: false
     });
@@ -818,8 +1191,11 @@ async function handleHelp(interaction) {
                 '`/unban <unique_id>` - Unban a player\n' +
                 '`/announce <message>` - Send server announcement\n' +
                 '`/serverchat <message> [color]` - Send chat message\n' +
-                '`/addadmin <user>` - Add bot admin (temporary)\n' +
-                '`/removeadmin <user>` - Remove bot admin (temporary)',
+                '`/addrole <admin|police> <unique_id>` - Grant in-game role\n' +
+                '`/removerole <admin|police> <unique_id>` - Revoke in-game role\n' +
+                '`/addadmin <user>` - Add bot admin\n' +
+                '`/removeadmin <user>` - Remove bot admin\n' +
+                '`/apiraw <endpoint>` - Call any Web API endpoint directly',
             inline: false
         });
     } else {
@@ -828,6 +1204,7 @@ async function handleHelp(interaction) {
             value:
                 '`/kick`, `/ban`, `/unban` - Player management\n' +
                 '`/announce`, `/serverchat` - Server communication\n' +
+                '`/addrole`, `/removerole` - In-game role management\n' +
                 '`/addadmin`, `/removeadmin` - Bot admin management\n\n' +
                 '❌ You need admin permissions to use these commands.',
             inline: false
@@ -838,7 +1215,8 @@ async function handleHelp(interaction) {
     embed.addFields({
         name: '💡 Tips',
         value:
-            '• Use `/players` to get player unique_ids for kick/ban commands\n' +
+            '• `/kick`, `/ban`, `/unban` and the role commands autocomplete player names — just start typing\n' +
+            '• Use `/find <name>` or `/players` to look up a unique_id by hand\n' +
             '• Color codes for `/serverchat` are in hex format (e.g., FF0000 for red)\n' +
             '• Admin permissions are managed via Discord User IDs in the bot configuration\n' +
             '• **Slash commands slow?** Use `!!` prefix instead (e.g., `!!help`, `!!status`)',
@@ -851,6 +1229,14 @@ async function handleHelp(interaction) {
 }
 
 async function handleJoin(interaction) {
+    if (!JOIN_SERVER_NAME) {
+        await interaction.editReply(
+            '⚠️ Join instructions are not configured.\n' +
+            'Set `JOIN_SERVER_NAME` (and optionally `JOIN_PASSWORD`) in your `.env` file.'
+        );
+        return;
+    }
+
     const embed = new EmbedBuilder()
         .setColor(0x00FF00)
         .setTitle('🎮 How to Join the Server')
@@ -868,25 +1254,34 @@ async function handleJoin(interaction) {
             },
             {
                 name: '3️⃣ Search for Server',
-                value: 'Look up **Bjs Town** in the server list.',
-                inline: false
-            },
-            {
-                name: '4️⃣ Enter Password',
-                value: '🔑 Password: `jerry`',
-                inline: false
-            },
-            {
-                name: '5️⃣ Connect!',
-                value: 'Click join and you\'ll be in the server! 🎉',
+                value: `Look up **${JOIN_SERVER_NAME}** in the server list.`,
                 inline: false
             }
-        )
-        .addFields({
-            name: '📋 Quick Reference',
-            value: '**Server Name:** Bjs Town\n**Password:** `jerry`',
+        );
+
+    if (JOIN_PASSWORD) {
+        embed.addFields({
+            name: '4️⃣ Enter Password',
+            value: `🔑 Password: \`${JOIN_PASSWORD}\``,
             inline: false
-        })
+        });
+    }
+
+    embed.addFields({
+        name: JOIN_PASSWORD ? '5️⃣ Connect!' : '4️⃣ Connect!',
+        value: 'Click join and you\'ll be in the server! 🎉',
+        inline: false
+    });
+
+    embed.addFields({
+        name: '📋 Quick Reference',
+        value: `**Server Name:** ${JOIN_SERVER_NAME}` +
+            (JOIN_PASSWORD ? `\n**Password:** \`${JOIN_PASSWORD}\`` : '\n**Password:** None') +
+            (JOIN_LINK ? `\n**More info:** ${JOIN_LINK}` : ''),
+        inline: false
+    });
+
+    embed
         .setFooter({ text: 'See you in-game!' })
         .setTimestamp();
 
@@ -914,38 +1309,47 @@ async function handleStatus(interaction) {
 
 async function handlePlayers(interaction) {
     const result = await apiCall('/player/list', 'GET');
-    
+
     if (!result.succeeded) {
         await interaction.editReply('Failed to fetch player list.');
         return;
     }
 
-    const players = result.data;
-    const playerCount = Object.keys(players).length;
+    const players = toArray(result.data);
 
-    if (playerCount === 0) {
+    if (players.length === 0) {
         await interaction.editReply('No players currently online.');
         return;
     }
 
-    const embed = new EmbedBuilder()
-        .setColor(0x00FF00)
-        .setTitle(`👥 Online Players (${playerCount})`)
-        .setTimestamp();
-
     // Get guild ID for nickname lookup
     const guildId = interaction.guild?.id || null;
 
-    for (const [index, player] of Object.entries(players)) {
-        const vehicleInfo = player.vehicle ? `\n🚗 Vehicle: ${player.vehicle.name}` : '';
-        const locationInfo = `📍 ${player.location}`;
+    const entries = [];
+    for (const player of players) {
         const displayName = await getPlayerDisplayName(player.unique_id, player.name, guildId);
-        
-        embed.addFields({
-            name: displayName,
-            value: `ID: \`${player.unique_id}\`\n${locationInfo}${vehicleInfo}`,
-            inline: false
-        });
+        const vehicleInfo = player.vehicle?.name ? ` · 🚗 ${player.vehicle.name}` : '';
+
+        // AFK and autopilot were added to /player/list in the 0.7.19 update. Older servers
+        // simply won't send these fields, in which case no badge is shown.
+        const badges = [];
+        if (player.afk || player.is_afk || player.bIsAFK) badges.push('💤 AFK');
+        if (player.autopilot || player.is_autopilot || player.bIsAutopilot) badges.push('🤖 Autopilot');
+        const badgeText = badges.length ? ` · ${badges.join(' · ')}` : '';
+
+        entries.push(`**${displayName}**${badgeText}\n\`${player.unique_id}\` · 📍 ${formatLocation(player.location)}${vehicleInfo}`);
+    }
+
+    const list = buildEmbedList(entries);
+
+    const embed = new EmbedBuilder()
+        .setColor(0x00FF00)
+        .setTitle(`👥 Online Players (${players.length})`)
+        .setDescription(list.text)
+        .setTimestamp();
+
+    if (list.omitted > 0) {
+        embed.setFooter({ text: `Showing ${list.shown} of ${players.length} players` });
     }
 
     await interaction.editReply({ embeds: [embed] });
@@ -983,37 +1387,29 @@ async function handleDeliveries(interaction) {
         return;
     }
 
-    const sites = result.data;
-    const siteCount = Object.keys(sites).length;
+    const sites = Object.entries(result.data || {});
 
-    if (siteCount === 0) {
+    if (sites.length === 0) {
         await interaction.editReply('No delivery sites available.');
         return;
     }
 
-    const embed = new EmbedBuilder()
-        .setColor(0xFFAA00)
-        .setTitle(`📦 Delivery Sites (${siteCount})`)
-        .setTimestamp();
-
-    let siteIndex = 0;
-    for (const [id, site] of Object.entries(sites)) {
-        if (siteIndex >= 10) break; // Discord embed field limit
-        
+    const entries = sites.map(([id, site]) => {
         const deliveryCount = site.Deliveries ? Object.keys(site.Deliveries).length : 0;
         const outputCount = site.OutputInventory ? Object.keys(site.OutputInventory).length : 0;
-        
-        embed.addFields({
-            name: site.name,
-            value: `📍 ${site.location}\n📦 Active Deliveries: ${deliveryCount}\n📤 Output Items: ${outputCount}`,
-            inline: false
-        });
-        
-        siteIndex++;
-    }
+        return `**${site.name || id}**\n📍 ${formatLocation(site.location)} · 📦 ${deliveryCount} deliveries · 📤 ${outputCount} items`;
+    });
 
-    if (siteCount > 10) {
-        embed.setFooter({ text: `Showing 10 of ${siteCount} sites` });
+    const list = buildEmbedList(entries);
+
+    const embed = new EmbedBuilder()
+        .setColor(0xFFAA00)
+        .setTitle(`📦 Delivery Sites (${sites.length})`)
+        .setDescription(list.text)
+        .setTimestamp();
+
+    if (list.omitted > 0) {
+        embed.setFooter({ text: `Showing ${list.shown} of ${sites.length} sites` });
     }
 
     await interaction.editReply({ embeds: [embed] });
@@ -1021,31 +1417,37 @@ async function handleDeliveries(interaction) {
 
 async function handleHousing(interaction) {
     const result = await apiCall('/housing/list', 'GET');
-    
+
     if (!result.succeeded) {
         await interaction.editReply('Failed to fetch housing information.');
         return;
     }
 
-    const houses = result.data;
-    const houseCount = Object.keys(houses).length;
+    const houses = Object.entries(result.data || {});
 
-    if (houseCount === 0) {
+    if (houses.length === 0) {
         await interaction.editReply('No houses owned.');
         return;
     }
 
+    const guildId = interaction.guild?.id || null;
+
+    const entries = [];
+    for (const [name, house] of houses) {
+        const owner = await getPlayerDisplayName(house.owner_unique_id, house.owner_unique_id, guildId);
+        entries.push(`**${name}**\n👤 ${owner} · ⏱️ ${house.expire_time}`);
+    }
+
+    const list = buildEmbedList(entries);
+
     const embed = new EmbedBuilder()
         .setColor(0x00AAFF)
-        .setTitle(`🏠 Housing (${houseCount} owned)`)
+        .setTitle(`🏠 Housing (${houses.length} owned)`)
+        .setDescription(list.text)
         .setTimestamp();
 
-    for (const [name, house] of Object.entries(houses)) {
-        embed.addFields({
-            name: name,
-            value: `👤 Owner ID: \`${house.owner_unique_id}\`\n⏱️ Expires: ${house.expire_time}`,
-            inline: false
-        });
+    if (list.omitted > 0) {
+        embed.setFooter({ text: `Showing ${list.shown} of ${houses.length} houses` });
     }
 
     await interaction.editReply({ embeds: [embed] });
@@ -1053,31 +1455,29 @@ async function handleHousing(interaction) {
 
 async function handleBanlist(interaction) {
     const result = await apiCall('/player/banlist', 'GET');
-    
+
     if (!result.succeeded) {
         await interaction.editReply('Failed to fetch ban list.');
         return;
     }
 
-    const bans = result.data;
-    const banCount = Object.keys(bans).length;
+    const bans = toArray(result.data);
 
-    if (banCount === 0) {
+    if (bans.length === 0) {
         await interaction.editReply('No players are currently banned.');
         return;
     }
 
+    const list = buildEmbedList(bans.map(player => `**${player.name}** · \`${player.unique_id}\``));
+
     const embed = new EmbedBuilder()
         .setColor(0xFF0000)
-        .setTitle(`🚫 Banned Players (${banCount})`)
+        .setTitle(`🚫 Banned Players (${bans.length})`)
+        .setDescription(list.text)
         .setTimestamp();
 
-    for (const [index, player] of Object.entries(bans)) {
-        embed.addFields({
-            name: player.name,
-            value: `ID: \`${player.unique_id}\``,
-            inline: true
-        });
+    if (list.omitted > 0) {
+        embed.setFooter({ text: `Showing ${list.shown} of ${bans.length} bans` });
     }
 
     await interaction.editReply({ embeds: [embed] });
@@ -1085,32 +1485,30 @@ async function handleBanlist(interaction) {
 
 async function handleRoleList(interaction, role) {
     const result = await apiCall('/player/role/list', 'GET', { role });
-    
+
     if (!result.succeeded) {
         await interaction.editReply(`Failed to fetch ${role} list.`);
         return;
     }
 
-    const roleData = result.data[role] || {};
-    const count = Object.keys(roleData).length;
+    const members = toArray(result.data?.[role]);
 
-    if (count === 0) {
+    if (members.length === 0) {
         await interaction.editReply(`No ${role}s currently assigned.`);
         return;
     }
 
+    const list = buildEmbedList(members.map(player => `**${player.nickname || 'Unknown'}** · \`${player.unique_id}\``));
+
     const emoji = role === 'admin' ? '👑' : '👮';
     const embed = new EmbedBuilder()
         .setColor(role === 'admin' ? 0xFFD700 : 0x0066FF)
-        .setTitle(`${emoji} ${role.charAt(0).toUpperCase() + role.slice(1)}s (${count})`)
+        .setTitle(`${emoji} ${role.charAt(0).toUpperCase() + role.slice(1)}s (${members.length})`)
+        .setDescription(list.text)
         .setTimestamp();
 
-    for (const [index, player] of Object.entries(roleData)) {
-        embed.addFields({
-            name: player.nickname,
-            value: `ID: \`${player.unique_id}\``,
-            inline: true
-        });
+    if (list.omitted > 0) {
+        embed.setFooter({ text: `Showing ${list.shown} of ${members.length}` });
     }
 
     await interaction.editReply({ embeds: [embed] });
@@ -1130,7 +1528,7 @@ async function handleKick(interaction) {
         
         await interaction.editReply({ embeds: [embed] });
     } else {
-        await interaction.editReply(`Failed to kick player: ${result.message}`);
+        await interaction.editReply(`Failed to kick player: ${result.message || 'Unknown error'}`);
     }
 }
 
@@ -1157,7 +1555,7 @@ async function handleBan(interaction) {
         
         await interaction.editReply({ embeds: [embed] });
     } else {
-        await interaction.editReply(`Failed to ban player: ${result.message}`);
+        await interaction.editReply(`Failed to ban player: ${result.message || 'Unknown error'}`);
     }
 }
 
@@ -1175,7 +1573,7 @@ async function handleUnban(interaction) {
         
         await interaction.editReply({ embeds: [embed] });
     } else {
-        await interaction.editReply(`Failed to unban player: ${result.message}`);
+        await interaction.editReply(`Failed to unban player: ${result.message || 'Unknown error'}`);
     }
 }
 
@@ -1196,7 +1594,7 @@ async function handleAnnounce(interaction) {
         
         await interaction.editReply({ embeds: [embed] });
     } else {
-        await interaction.editReply(`Failed to send announcement: ${result.message}`);
+        await interaction.editReply(`Failed to send announcement: ${result.message || 'Unknown error'}`);
     }
 }
 
@@ -1221,7 +1619,165 @@ async function handleServerChat(interaction) {
         
         await interaction.editReply({ embeds: [embed] });
     } else {
-        await interaction.editReply(`Failed to send message: ${result.message}`);
+        await interaction.editReply(`Failed to send message: ${result.message || 'Unknown error'}`);
+    }
+}
+
+async function handleFind(interaction) {
+    const query = (interaction.options.getString('name') || '').toLowerCase();
+    const result = await apiCall('/player/list', 'GET');
+
+    if (!result.succeeded) {
+        await interaction.editReply('Failed to fetch player list.');
+        return;
+    }
+
+    const matches = toArray(result.data).filter(p =>
+        (p.name || '').toLowerCase().includes(query) || String(p.unique_id).includes(query)
+    );
+
+    if (matches.length === 0) {
+        await interaction.editReply(`No online player matches \`${query}\`.`);
+        return;
+    }
+
+    const guildId = interaction.guild?.id || null;
+    const entries = [];
+    for (const player of matches) {
+        const displayName = await getPlayerDisplayName(player.unique_id, player.name, guildId);
+        entries.push(`**${displayName}**\n\`${player.unique_id}\` · 📍 ${formatLocation(player.location)}`);
+    }
+
+    const list = buildEmbedList(entries);
+    const embed = new EmbedBuilder()
+        .setColor(0x00AAFF)
+        .setTitle(`🔍 Found ${matches.length} player${matches.length === 1 ? '' : 's'}`)
+        .setDescription(list.text)
+        .setFooter({ text: 'Use the ID with /kick, /ban or /addrole' })
+        .setTimestamp();
+
+    await interaction.editReply({ embeds: [embed] });
+}
+
+async function handleCompany(interaction) {
+    const days = interaction.options.getInteger('days') || 7;
+
+    let result;
+    try {
+        result = await apiCall('/company/profit', 'GET', { days });
+    } catch (error) {
+        // This endpoint arrived in a 2026 server update; older servers 404 on it.
+        await interaction.editReply(
+            `❌ Could not read company profit data: ${describeError(error)}\n` +
+            'This endpoint requires a recent Motor Town dedicated server build.'
+        );
+        return;
+    }
+
+    if (!result.succeeded) {
+        await interaction.editReply(
+            `❌ Server rejected the request: ${result.message || 'Unknown error'}\n` +
+            'This endpoint requires a recent Motor Town dedicated server build.'
+        );
+        return;
+    }
+
+    const entries = Object.entries(result.data || {});
+    if (entries.length === 0) {
+        await interaction.editReply(`No company profit data reported for the last ${days} day(s).`);
+        return;
+    }
+
+    // The exact response shape isn't documented, so render whatever the server sends
+    // rather than guessing at field names and showing "undefined".
+    const lines = entries.map(([key, value]) => {
+        if (value !== null && typeof value === 'object') {
+            const inner = Object.entries(value)
+                .map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`)
+                .join(' · ');
+            return `**${key}**\n${inner}`;
+        }
+        return `**${key}**: ${value}`;
+    });
+
+    const list = buildEmbedList(lines);
+    const embed = new EmbedBuilder()
+        .setColor(0x2ecc71)
+        .setTitle(`💰 Company Profit (last ${days} day${days === 1 ? '' : 's'})`)
+        .setDescription(list.text)
+        .setTimestamp();
+
+    if (list.omitted > 0) {
+        embed.setFooter({ text: `Showing ${list.shown} of ${entries.length} entries` });
+    }
+
+    await interaction.editReply({ embeds: [embed] });
+}
+
+async function handleApiRaw(interaction) {
+    let endpoint = interaction.options.getString('endpoint').trim();
+    if (!endpoint.startsWith('/')) endpoint = `/${endpoint}`;
+
+    // Parse "key=value key=value" into params
+    const params = {};
+    const rawParams = interaction.options.getString('params');
+    if (rawParams) {
+        for (const pair of rawParams.split(/\s+/).filter(Boolean)) {
+            const index = pair.indexOf('=');
+            if (index > 0) params[pair.slice(0, index)] = pair.slice(index + 1);
+        }
+    }
+
+    // Never let someone override the password through this command.
+    delete params.password;
+
+    let result;
+    try {
+        result = await apiCall(endpoint, 'GET', params);
+    } catch (error) {
+        await interaction.editReply(`❌ \`GET ${endpoint}\` failed: ${describeError(error)}`);
+        return;
+    }
+
+    let json = JSON.stringify(result, null, 2);
+    let truncated = false;
+    if (json.length > 1900) {
+        json = json.slice(0, 1900);
+        truncated = true;
+    }
+
+    await interaction.editReply(
+        `\`GET ${endpoint}\`\n\`\`\`json\n${json}\n\`\`\`` +
+        (truncated ? '\n*(response truncated)*' : '')
+    );
+}
+
+async function handleRoleChange(interaction, action) {
+    const role = interaction.options.getString('role');
+    const uniqueId = interaction.options.getString('unique_id');
+
+    if (!['admin', 'police'].includes(role)) {
+        await interaction.editReply('❌ Role must be either `admin` or `police`.');
+        return;
+    }
+
+    const result = await apiCall(`/player/role/${action}`, 'POST', { role, unique_id: uniqueId });
+
+    if (result.succeeded) {
+        const granted = action === 'add';
+        const embed = new EmbedBuilder()
+            .setColor(granted ? 0x00FF00 : 0xFF6600)
+            .setTitle(granted ? '✅ Role Granted' : '✅ Role Revoked')
+            .setDescription(
+                granted
+                    ? `Player \`${uniqueId}\` is now **${role}**.`
+                    : `Player \`${uniqueId}\` is no longer **${role}**.`
+            )
+            .setTimestamp();
+
+        await interaction.editReply({ embeds: [embed] });
+    } else {
+        await interaction.editReply(`Failed to ${action} role: ${result.message || 'Unknown error'}`);
     }
 }
 
@@ -1265,6 +1821,10 @@ async function handleAddAdmin(interaction) {
     }
 
     const targetUser = interaction.options.getUser('user');
+    if (!targetUser) {
+        await interaction.editReply('❌ Could not find that user. Mention them directly, e.g. `!!addadmin @JohnDoe`.');
+        return;
+    }
     const targetUserId = targetUser.id;
 
     if (ADMIN_USER_IDS.includes(targetUserId)) {
@@ -1273,6 +1833,7 @@ async function handleAddAdmin(interaction) {
     }
 
     ADMIN_USER_IDS.push(targetUserId);
+    savePersistedAdmins();
 
     const embed = new EmbedBuilder()
         .setColor(0x00FF00)
@@ -1280,7 +1841,7 @@ async function handleAddAdmin(interaction) {
         .setDescription(`${targetUser.tag} has been added as a bot admin.`)
         .addFields({
             name: 'Note',
-            value: '⚠️ This change is temporary. To make it permanent, add their ID to the ADMIN_USER_IDS in your .env file:\n```\nADMIN_USER_IDS=120343643381956608,' + targetUserId + '\n```'
+            value: 'Saved to `admin_data.json`, so this survives a restart. To bake it into your config instead, add their ID to `ADMIN_USER_IDS` in `.env`:\n```\nADMIN_USER_IDS=' + ADMIN_USER_IDS.join(',') + '\n```'
         })
         .setTimestamp();
 
@@ -1295,11 +1856,15 @@ async function handleRemoveAdmin(interaction) {
     }
 
     const targetUser = interaction.options.getUser('user');
+    if (!targetUser) {
+        await interaction.editReply('❌ Could not find that user. Mention them directly, e.g. `!!removeadmin @JohnDoe`.');
+        return;
+    }
     const targetUserId = targetUser.id;
 
-    // Prevent removing yourself if you're the last admin
-    if (targetUserId === interaction.user.id && ADMIN_USER_IDS.length === 1) {
-        await interaction.editReply('❌ Cannot remove yourself as the last admin.');
+    // Prevent removing the last admin, which would lock everyone out of admin commands
+    if (ADMIN_USER_IDS.length === 1 && ADMIN_USER_IDS[0] === targetUserId) {
+        await interaction.editReply('❌ Cannot remove the last remaining admin.');
         return;
     }
 
@@ -1310,6 +1875,9 @@ async function handleRemoveAdmin(interaction) {
     }
 
     ADMIN_USER_IDS.splice(index, 1);
+    savePersistedAdmins();
+
+    const fromEnv = (process.env.ADMIN_USER_IDS || '').split(',').map(id => id.trim()).includes(targetUserId);
 
     const embed = new EmbedBuilder()
         .setColor(0xFF6600)
@@ -1317,7 +1885,9 @@ async function handleRemoveAdmin(interaction) {
         .setDescription(`${targetUser.tag} has been removed from bot admins.`)
         .addFields({
             name: 'Note',
-            value: '⚠️ This change is temporary. To make it permanent, remove their ID from the ADMIN_USER_IDS in your .env file.'
+            value: fromEnv
+                ? '⚠️ This user is listed in `ADMIN_USER_IDS` in your `.env`, so they will be an admin again on restart. Remove their ID from `.env` to make this permanent.'
+                : 'Saved to `admin_data.json`, so this survives a restart.'
         })
         .setTimestamp();
 
@@ -1519,4 +2089,33 @@ async function handleTestMapping(interaction) {
     await interaction.editReply({ embeds: [embed] });
 }
 
-client.login(DISCORD_TOKEN);
+// Keep the bot alive on transient failures instead of dying silently.
+process.on('unhandledRejection', (error) => {
+    console.error('Unhandled promise rejection:', error);
+});
+
+client.on('error', (error) => {
+    console.error('Discord client error:', error.message);
+});
+
+// Tear down cleanly. Calling process.exit() while sockets are still closing trips an
+// assertion inside libuv on Windows, so let the event loop drain and only force the
+// exit if something is still holding it open a second later.
+function shutdown(code) {
+    process.exitCode = code;
+    client.destroy().catch(() => {});
+    setTimeout(() => process.exit(code), 1000).unref();
+}
+
+for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.on(signal, () => {
+        console.log(`\nReceived ${signal}, shutting down...`);
+        shutdown(0);
+    });
+}
+
+client.login(DISCORD_TOKEN).catch(error => {
+    console.error('❌ Failed to log in to Discord:', error.message);
+    console.error('   Check that DISCORD_TOKEN in your .env file is correct and has not been reset.');
+    shutdown(1);
+});

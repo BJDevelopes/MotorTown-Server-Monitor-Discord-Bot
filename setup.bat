@@ -10,7 +10,7 @@ REM Check if Node.js is installed
 where node >nul 2>nul
 if %ERRORLEVEL% NEQ 0 (
     echo X Node.js is not installed!
-    echo Please install Node.js 16.9.0 or higher from https://nodejs.org/
+    echo Please install Node.js 18.0.0 or higher from https://nodejs.org/
     pause
     exit /b 1
 )
